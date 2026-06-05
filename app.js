@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   LIDAR_PENTE v1.0.0 — Pente MNT LIDAR IGN → MBTiles
+   LIDAR_PENTE v1.1.0 — Pente MNT LIDAR IGN → MBTiles
    Architecture identique à Platier CL v2.0.0
    Source MNT : IGN Géoplateforme WCS (ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES)
    Calcul pente : algorithme de Horn (3×3)
@@ -269,6 +269,14 @@ async function slopeToPNG(slope, w, h, seuilDeg) {
   }
 }
 
+// ── RÉSOLUTION D'UNE TUILE EN M/PX (latitude réelle) ───────────────
+function tileResolution(y, z) {
+  const n   = 1 << z;
+  const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 0.5) / n))) * 180 / Math.PI;
+  // 156543.03 m/px à l'équateur au zoom 0, divisé par 2^z, corrigé par cos(lat)
+  return 156543.03 * Math.cos(lat * Math.PI / 180) / n;
+}
+
 // ── FETCH TUILE MNT via WCS ────────────────────────────────────────
 async function fetchMNTtile(x, y, z) {
   const bb = tileBBox(x, y, z);
@@ -281,21 +289,31 @@ async function fetchMNTtile(x, y, z) {
     + `&FORMAT=image/tiff`;
 
   const resp = await apiFetch(url);
-  // Si le WCS renvoie du XML d'erreur au lieu d'un TIFF
-  const ct = resp.headers.get('content-type') || '';
-  if (ct.includes('xml') || ct.includes('text')) {
-    const txt = await resp.text();
-    throw new Error('WCS erreur: ' + txt.slice(0, 120));
-  }
-  return parseTIFF(await resp.arrayBuffer());
-}
 
-// ── RÉSOLUTION APPROX. D'UNE TUILE EN M/PX ─────────────────────────
-function tileResolution(y, z) {
-  // latitude centrale de la tuile
-  const n = 1 << z;
-  const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 0.5) / n))) * 180 / Math.PI;
-  return 156543.03 * Math.cos(lat * Math.PI / 180) / n;
+  // Vérifier le Content-Type avant de lire le body
+  const ct = resp.headers.get('content-type') || '';
+  if (ct.includes('xml') || ct.includes('text/plain') || ct.includes('html')) {
+    const txt = await resp.text();
+    throw new Error(`WCS a renvoyé du texte (${ct}): ${txt.slice(0, 200)}`);
+  }
+
+  const buf = await resp.arrayBuffer();
+  if (buf.byteLength < 100) throw new Error(`Réponse WCS trop courte (${buf.byteLength} bytes) — hors couverture LIDAR ?`);
+
+  // Vérifier magic bytes TIFF
+  const magic = new Uint8Array(buf, 0, 4);
+  const isTIFF = (magic[0] === 0x49 && magic[1] === 0x49 && magic[2] === 0x2A && magic[3] === 0x00)
+              || (magic[0] === 0x4D && magic[1] === 0x4D && magic[2] === 0x00 && magic[3] === 0x2A);
+  if (!isTIFF) {
+    // Peut-être du PNG (IGN retourne parfois une image vide PNG)
+    const isPNG = magic[0] === 0x89 && magic[1] === 0x50;
+    throw new Error(`Format inattendu (magic=${Array.from(magic).map(b=>b.toString(16)).join('')}) — ${isPNG ? 'PNG reçu à la place du TIFF' : 'format inconnu'}`);
+  }
+
+  const parsed = parseTIFF(buf);
+  if (!parsed.w || !parsed.h) throw new Error(`parseTIFF: dimensions nulles (w=${parsed.w} h=${parsed.h})`);
+
+  return parsed;
 }
 
 // ── CONSTRUIRE MBTILES PENTE ───────────────────────────────────────
@@ -324,9 +342,10 @@ async function buildMBT(tiles, zoom, seuilDeg) {
 
   const ins   = db.prepare('INSERT OR REPLACE INTO tiles VALUES(?,?,?,?)');
   const total = tiles.length;
-  let done = 0, errs = 0;
+  let done = 0, inserted = 0, errs = 0;
+  let diagDone = false; // log diagnostic sur la 1ère tuile réussie
 
-  log(`Téléchargement ${total} tuiles MNT zoom ${zoom}, calcul pente…`, 'info');
+  log(`Téléchargement de ${total} tuile(s) MNT — zoom ${zoom} — ~${tileResolution(tiles[0].y, zoom).toFixed(1)} m/px`, 'info');
 
   for (let i = 0; i < total; i += CONCUR) {
     if (ST.ac.signal.aborted) throw new Error('Annulé');
@@ -336,45 +355,74 @@ async function buildMBT(tiles, zoom, seuilDeg) {
     const results = await Promise.allSettled(
       batch.map(async ({ z, x, y }) => {
         const { data, w, h } = await fetchMNTtile(x, y, z);
-        const cellM = tileResolution(y, z) / w * TILE_PX;  // m/px réel de la tuile
+        // cellSize = taille d'un pixel en mètres à cette latitude
+        const cellM = tileResolution(y, z);
         const slope = computeSlope(data, w, h, cellM);
         const png   = await slopeToPNG(slope, w, h, seuilDeg);
-        return { z, x, y, png };
+        return { z, x, y, png, w, h,
+          elevMin: Math.min(...Array.from(data).filter(v => v > NODATA)),
+          elevMax: Math.max(...Array.from(data).filter(v => v > NODATA)),
+        };
       })
     );
 
     for (let j = 0; j < batch.length; j++) {
       done++;
+      const { z, x, y } = batch[j];
+
       if (results[j].status === 'fulfilled') {
-        const { z, x, y, png } = results[j].value;
-        ins.run([z, x, (1 << z) - 1 - y, png]);  // TMS : Y inversé
+        const { png, w, h, elevMin, elevMax } = results[j].value;
+
+        // ── DIAGNOSTIC SUR LA 1ÈRE TUILE ──────────────────────────
+        if (!diagDone) {
+          diagDone = true;
+          log(`Diag 1ère tuile z${z}/${x}/${y} : TIFF ${w}×${h}px — élév. [${elevMin.toFixed(1)}, ${elevMax.toFixed(1)}] m — PNG ${png.length} bytes`, 'info');
+        }
+
+        // sql.js exige un tableau JS ordinaire pour les BLOB, pas un Uint8Array
+        const tmsY = (1 << z) - 1 - y;  // convention TMS (Y inversé vs XYZ)
+        try {
+          ins.run([z, x, tmsY, Array.from(png)]);
+          inserted++;
+        } catch (sqlErr) {
+          errs++;
+          log(`✗ SQL z${z}/${x}/${y} : ${sqlErr.message}`, 'err');
+        }
       } else {
         errs++;
-        const { z, x, y } = batch[j];
-        log(`✗ ${z}/${x}/${y} : ${results[j].reason?.message}`, 'warn');
+        log(`✗ WCS z${z}/${x}/${y} : ${results[j].reason?.message}`, 'warn');
       }
     }
 
     await prog(
-      `Tuiles ${done}/${total}${errs ? ` (${errs} erreurs)` : ''}`,
+      `Tuiles ${done}/${total} — ${inserted} insérées${errs ? ` (${errs} erreurs)` : ''}`,
       15 + 80 * (done / total)
     );
   }
 
   ins.free();
-  log(`Export SQLite (${done - errs} tuiles insérées)…`, 'info');
+
+  if (inserted === 0) {
+    db.close();
+    throw new Error(`Aucune tuile insérée sur ${total} (${errs} erreurs). Vérifiez la couverture LIDAR IGN de la zone.`);
+  }
+
+  log(`SQLite : ${inserted}/${total} tuiles insérées — export en cours…`, inserted < total ? 'warn' : 'ok');
   await prog('Export SQLite…', 97);
 
-  const data = db.export();
+  // db.export() retourne un Uint8Array sur un buffer potentiellement partagé → .slice() obligatoire
+  const raw  = db.export();
+  const data = raw.slice();   // copie propre pour le Blob
   db.close();
-  if (!data || data.byteLength < 512) throw new Error('Export SQLite vide.');
+
+  if (data.byteLength < 4096) throw new Error(`Export SQLite anormalement petit (${data.byteLength} bytes).`);
   return data;
 }
 
 // ── DÉCLENCHEUR TÉLÉCHARGEMENT ─────────────────────────────────────
 function triggerDL(data, zoom, seuilDeg) {
   try {
-    const blob = new Blob([data.buffer], { type: 'application/x-sqlite3' });
+    const blob = new Blob([data], { type: 'application/x-sqlite3' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href = url;
@@ -474,4 +522,4 @@ $('btnAbort').addEventListener('click', () => {
   if (ST.ac) { ST.ac.abort(); log('Annulation…', 'warn'); }
 });
 
-log('LIDAR_PENTE v1.0 prêt. Dessinez un rectangle sur la carte.', 'ok');
+log('LIDAR_PENTE v1.1 prêt. Dessinez un rectangle sur la carte.', 'ok');
