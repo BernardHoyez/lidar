@@ -1,5 +1,5 @@
-/* LIDAR_PENTE — Service Worker v1.1.0 */
-const CACHE    = 'lidar-pente-v1.1.0';
+/* LIDAR_PENTE — Service Worker v1.2.0 */
+const CACHE    = 'lidar-pente-v1.2.0';
 const PRECACHE = ['./', './index.html', './app.js', './manifest.json', './icon192.png', './icon512.png'];
 
 self.addEventListener('install', e => {
