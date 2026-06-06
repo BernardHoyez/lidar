@@ -97,11 +97,10 @@ map.on(L.Draw.Event.CREATED,e=>{
   ST.bbox={minLon:b.getWest(),minLat:b.getSouth(),maxLon:b.getEast(),maxLat:b.getNorth()};
   resetState();
   updateCoords();
-  map.fitBounds(b,{padding:[20,20]});
   log(`Zone : [${ST.bbox.minLon.toFixed(4)}, ${ST.bbox.minLat.toFixed(4)}] → [${ST.bbox.maxLon.toFixed(4)}, ${ST.bbox.maxLat.toFixed(4)}]`,'ok');
-  uiSetPhase('bbox');
+  uiEnable(true);
 });
-map.on(L.Draw.Event.DELETED,()=>{ST.bbox=null;resetState();updateCoords();uiSetPhase('idle');});
+map.on(L.Draw.Event.DELETED,()=>{ST.bbox=null;resetState();updateCoords();uiEnable(false);});
 
 const mapInfo=$('mapInfo');
 map.on('mousemove',e=>{mapInfo.style.display='block';mapInfo.textContent=`${e.latlng.lng.toFixed(5)}°E  ${e.latlng.lat.toFixed(5)}°N`;});
@@ -112,7 +111,7 @@ function resetState(){
   ST.cols=ST.rows=0;
   if(estranLyr){map.removeLayer(estranLyr);estranLyr=null;}
   dlEl.classList.remove('visible');
-  hideVisu();
+  $('visuSection').style.display='none';
 }
 function updateCoords(){
   const b=ST.bbox;
@@ -121,28 +120,18 @@ function updateCoords(){
   $('cLatMin').textContent=b?b.minLat.toFixed(4):'—';
   $('cLatMax').textContent=b?b.maxLat.toFixed(4):'—';
 }
-
-// ── PHASES UI ──────────────────────────────────────────────────────
-// idle → bbox → estran → pente → visu
-function uiSetPhase(ph){
-  $('btnClear').disabled    = ph==='idle';
-  $('btnEstran').disabled   = ph!=='bbox';
-  $('btnPente').disabled    = ph!=='estran';
-  $('btnExport').disabled   = ph!=='visu';
-  ['step2title','step3title','step4title'].forEach(id=>$(id).classList.add('inactive'));
-  if(ph==='bbox'||ph==='estran'||ph==='pente'||ph==='visu') $('step2title').classList.remove('inactive');
-  if(ph==='estran'||ph==='pente'||ph==='visu')              $('step3title').classList.remove('inactive');
-  if(ph==='visu')                                            $('step4title').classList.remove('inactive');
-  $('btnAbort').disabled=true;
+function uiEnable(on){
+  $('btnClear').disabled   = !on;
+  $('btnEstran').disabled  = !on;
+  ['step2title','step3title'].forEach(id=>$(id).classList.toggle('inactive',!on));
 }
-uiSetPhase('idle');
 
 $('btnClear').addEventListener('click',()=>{
   drawn.clearLayers();
   ST.bbox=null;
   resetState();
   updateCoords();
-  uiSetPhase('idle');
+  uiEnable(false);
   prog('En attente',0);setStatus('idle');
   log('Zone effacée.','warn');
 });
@@ -373,7 +362,7 @@ $('btnEstran').addEventListener('click',async()=>{
 
     await prog('✓ Étape 1 terminée',100);
     setStatus('done');
-    uiSetPhase('estran');
+    uiEnable(true);
     log('✓ Estran extrait. Lancez l\'extraction des pentes.','ok');
 
   }catch(e){
@@ -510,14 +499,14 @@ async function canvasToPNG(canvas){
 // ST.tileSlopes : Map<"z/x/y", Float32Array>
 // ST.tileCanvases: Map<"z/x/y", HTMLCanvasElement>
 
-$('btnPente').addEventListener('click',async()=>{
+$('btnEstran').addEventListener('click',async()=>{
   if(!ST.mask) return;
   ST.t0=Date.now();
   ST.ac=new AbortController();
-  $('btnPente').disabled=true;
+  $('btnEstran').disabled=true;
   $('btnAbort').disabled=false;
   setStatus('run');
-  hideVisu();
+  $('visuSection').style.display='none';
   dlEl.classList.remove('visible');
 
   const zoom=parseInt($('tileZoom').value)||14;
@@ -580,7 +569,7 @@ $('btnPente').addEventListener('click',async()=>{
 
     await prog('✓ Étape 2 terminée',100);
     setStatus('done');
-    uiSetPhase('visu');
+    uiEnable(true);
     renderVisu();
     log('✓ Pentes calculées. Ajustez les curseurs pour affiner les contrastes.','ok');
 
@@ -588,7 +577,7 @@ $('btnPente').addEventListener('click',async()=>{
     if(e.message==='Annulé'){log('Annulé.','warn');setStatus('idle');await prog('Annulé',0);}
     else{log('ERREUR : '+e.message,'err');setStatus('err');await prog('Erreur',0);}
   }finally{
-    $('btnPente').disabled=false;
+    $('btnEstran').disabled=false;
     $('btnAbort').disabled=true;
     ST.ac=null;
   }
@@ -658,10 +647,9 @@ function renderVisu(){
     ctx.setLineDash([]);
   }
 
-  $('visuWrap').style.display='block';
+  $('visuSection').style.display='block';
 }
 
-function hideVisu(){$('visuWrap').style.display='none';}
 
 // ═══════════════════════════════════════════════════════════════════
 //  ÉTAPE 4 : EXPORT MBTILES
