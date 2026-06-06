@@ -1,280 +1,158 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LIDAR Pente — Extracteur de pente IGN</title>
-  <meta name="description" content="Extraction de la pente altimétrique depuis le MNT LIDAR HD IGN, export MBTiles niveaux de gris" />
-  <meta name="theme-color" content="#0a1628" />
-  <link rel="manifest" href="manifest.json" />
-  <link rel="apple-touch-icon" href="icon192.png" />
-  <link rel="icon" href="icon192.png" />
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>LIDAR Pente — Estran IGN</title>
+  <meta name="description" content="Détection d'irrégularités topographiques sur l'estran par analyse de pente LIDAR HD IGN"/>
+  <meta name="theme-color" content="#0a1628"/>
+  <link rel="manifest" href="manifest.json"/>
+  <link rel="apple-touch-icon" href="icon192.png"/>
+  <link rel="icon" href="icon192.png"/>
 
-  <!-- Leaflet -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-  <!-- Leaflet Draw -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"/>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
-  <!-- sql.js (SQLite WASM) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Turf.js/6.5.0/turf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.2/sql-wasm.js"></script>
 
   <style>
-    /* ─── DESIGN SYSTEM ──────────────────────────────── */
-    :root {
-      --bg:        #06111f;
-      --panel:     #0d1e30;
-      --border:    #1a3352;
-      --accent:    #00c8a0;
-      --accent2:   #0090ff;
-      --warn:      #f0a500;
-      --danger:    #e04040;
-      --text:      #c8dff0;
-      --text-dim:  #5a8090;
-      --font-mono: 'Courier New', monospace;
-      --radius:    6px;
-      --panel-w:   340px;
+    :root{
+      --bg:#06111f;--panel:#0d1e30;--border:#1a3352;
+      --acc:#00c8a0;--acc2:#0090ff;--warn:#f0a500;--err:#e04040;
+      --txt:#c8dff0;--dim:#5a8090;--mono:'Courier New',monospace;--r:6px;
     }
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+    body{background:var(--bg);color:var(--txt);font-family:'Segoe UI',system-ui,sans-serif;
+         font-size:13px;height:100dvh;display:flex;flex-direction:column;overflow:hidden;}
 
-    body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      font-size: 13px;
-      height: 100dvh;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
+    /* ── HEADER ── */
+    header{background:var(--panel);border-bottom:1px solid var(--border);
+           padding:10px 16px;display:flex;align-items:center;gap:14px;flex-shrink:0;z-index:1000;}
+    .logo{font-size:17px;font-weight:700;letter-spacing:.08em;color:var(--acc);font-family:var(--mono);}
+    .logo span{color:var(--acc2);}
+    .tagline{font-size:10px;color:var(--dim);letter-spacing:.06em;text-transform:uppercase;}
+    .header-r{margin-left:auto;}
 
-    /* ─── HEADER ─────────────────────────────────────── */
-    header {
-      background: var(--panel);
-      border-bottom: 1px solid var(--border);
-      padding: 10px 16px;
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      flex-shrink: 0;
-      z-index: 1000;
-    }
-    .logo {
-      font-size: 18px;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      color: var(--accent);
-      font-family: var(--font-mono);
-    }
-    .logo span { color: var(--accent2); }
-    .tagline {
-      font-size: 11px;
-      color: var(--text-dim);
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-    }
-    .header-actions { margin-left: auto; display: flex; gap: 8px; }
+    /* ── LAYOUT ── */
+    .workspace{flex:1;display:flex;overflow:hidden;}
+    #map{flex:1;background:#081520;cursor:crosshair;}
 
-    /* ─── LAYOUT ─────────────────────────────────────── */
-    .workspace {
-      flex: 1;
-      display: flex;
-      overflow: hidden;
-    }
+    /* ── PANEL ── */
+    .panel{width:320px;background:var(--panel);border-left:1px solid var(--border);
+           display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;}
+    .psec{border-bottom:1px solid var(--border);padding:12px 14px;}
+    .stitle{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--acc);
+            margin-bottom:9px;display:flex;align-items:center;gap:6px;}
+    .stitle .badge{background:var(--acc);color:var(--bg);border-radius:50%;
+                   width:16px;height:16px;font-size:9px;display:flex;align-items:center;
+                   justify-content:center;font-weight:700;}
+    .stitle.inactive{color:var(--dim);}.stitle.inactive .badge{background:var(--dim);}
 
-    /* ─── MAP ────────────────────────────────────────── */
-    #map {
-      flex: 1;
-      background: #081520;
-      cursor: crosshair;
-    }
+    /* coordonnées */
+    .cgrid{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:9px;}
+    .cbox{background:var(--bg);border:1px solid var(--border);border-radius:var(--r);padding:5px 7px;}
+    .clbl{font-size:9px;color:var(--dim);text-transform:uppercase;margin-bottom:1px;}
+    .cval{font-family:var(--mono);font-size:11px;color:var(--acc2);}
 
-    /* ─── SIDE PANEL ─────────────────────────────────── */
-    .panel {
-      width: var(--panel-w);
-      background: var(--panel);
-      border-left: 1px solid var(--border);
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-      flex-shrink: 0;
-    }
-    .panel-section {
-      border-bottom: 1px solid var(--border);
-      padding: 14px;
-    }
-    .section-title {
-      font-size: 10px;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--accent);
-      margin-bottom: 10px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .section-title .step-badge {
-      background: var(--accent);
-      color: var(--bg);
-      border-radius: 50%;
-      width: 16px; height: 16px;
-      font-size: 9px;
-      display: flex; align-items: center; justify-content: center;
-      font-weight: 700;
-    }
-    .section-title.inactive { color: var(--text-dim); }
-    .section-title.inactive .step-badge { background: var(--text-dim); }
+    /* champs */
+    .frow{display:flex;flex-direction:column;gap:3px;margin-bottom:8px;}
+    .frow label{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;}
+    .frow input,.frow select{background:var(--bg);border:1px solid var(--border);
+      border-radius:var(--r);padding:5px 7px;color:var(--txt);font-size:12px;}
+    .frow input:focus,.frow select:focus{outline:none;border-color:var(--acc);}
+    .frow2{display:flex;gap:6px;margin-bottom:8px;}
+    .frow2 .frow{flex:1;margin-bottom:0;}
 
-    /* ─── COORD DISPLAY ──────────────────────────────── */
-    .coords-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 6px;
-      margin-bottom: 10px;
-    }
-    .coord-box {
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 6px 8px;
-    }
-    .coord-label { font-size: 9px; color: var(--text-dim); text-transform: uppercase; margin-bottom: 2px; }
-    .coord-val { font-family: var(--font-mono); font-size: 11px; color: var(--accent2); }
+    /* boutons */
+    .btn{display:inline-flex;align-items:center;gap:6px;padding:8px 12px;
+         border-radius:var(--r);border:none;cursor:pointer;font-size:12px;
+         font-weight:600;letter-spacing:.04em;transition:all .15s;
+         width:100%;justify-content:center;}
+    .btn-primary{background:var(--acc);color:var(--bg);}
+    .btn-primary:hover:not(:disabled){filter:brightness(1.12);}
+    .btn-secondary{background:transparent;color:var(--txt);border:1px solid var(--border);}
+    .btn-secondary:hover:not(:disabled){border-color:var(--acc);color:var(--acc);}
+    .btn-warn{background:var(--warn);color:var(--bg);}
+    .btn:disabled{opacity:.35;cursor:not-allowed;}
+    .btn-sm{padding:5px 10px;font-size:11px;margin-bottom:5px;}
 
-    /* ─── BUTTONS ────────────────────────────────────── */
-    .btn {
-      display: inline-flex; align-items: center; gap: 6px;
-      padding: 8px 14px;
-      border-radius: var(--radius);
-      border: none; cursor: pointer;
-      font-size: 12px; font-weight: 600;
-      letter-spacing: 0.04em;
-      transition: all .15s;
-      width: 100%;
-      justify-content: center;
-    }
-    .btn-primary   { background: var(--accent); color: var(--bg); }
-    .btn-primary:hover:not(:disabled) { filter: brightness(1.15); }
-    .btn-secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
-    .btn-secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-    .btn:disabled  { opacity: 0.35; cursor: not-allowed; }
-    .btn-warn      { background: var(--warn); color: var(--bg); }
+    /* curseurs */
+    .slider-row{display:flex;align-items:center;gap:8px;margin-bottom:6px;}
+    .slider-row label{font-size:9px;color:var(--dim);width:32px;flex-shrink:0;}
+    .slider-row input[type=range]{flex:1;-webkit-appearance:none;height:3px;
+      background:var(--border);border-radius:2px;outline:none;cursor:pointer;}
+    .slider-row input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;
+      width:14px;height:14px;background:var(--acc);border-radius:50%;}
+    .slider-val{font-size:11px;color:var(--acc);font-family:var(--mono);
+                width:38px;text-align:right;flex-shrink:0;}
+    .info-box{background:rgba(0,200,160,.07);border:1px solid rgba(0,200,160,.2);
+              border-radius:var(--r);padding:6px 8px;font-size:10px;color:var(--dim);
+              line-height:1.7;margin-bottom:8px;}
+    .info-box strong{color:var(--acc);}
 
-    /* ─── CHAMPS ─────────────────────────────────────── */
-    .field-row {
-      display: flex; flex-direction: column; gap: 4px;
-      margin-bottom: 10px;
-    }
-    .field-row label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
-    .field-row input, .field-row select {
-      background: var(--bg); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 6px 8px;
-      color: var(--text); font-size: 12px;
-    }
-    .field-row input:focus, .field-row select:focus {
-      outline: none; border-color: var(--accent);
-    }
+    /* log */
+    .log-area{flex:1;overflow-y:auto;padding:9px 13px;font-family:var(--mono);
+              font-size:11px;line-height:1.7;background:var(--bg);}
+    .log-line{display:flex;gap:6px;}
+    .log-line .ts{color:var(--dim);flex-shrink:0;}
+    .log-line.ok .msg{color:var(--acc);}
+    .log-line.info .msg{color:var(--txt);}
+    .log-line.warn .msg{color:var(--warn);}
+    .log-line.err .msg{color:var(--err);}
 
-    /* ─── INFO BOX ───────────────────────────────────── */
-    .info-box {
-      background: rgba(0,200,160,.07);
-      border: 1px solid rgba(0,200,160,.2);
-      border-radius: var(--radius);
-      padding: 7px 9px;
-      font-size: 10px; color: var(--text-dim); line-height: 1.7;
-      margin-bottom: 10px;
-    }
-    .info-box strong { color: var(--accent); }
+    /* progress */
+    .prog-wrap{padding:7px 13px;background:var(--panel);border-top:1px solid var(--border);}
+    .prog-lbl{font-size:10px;color:var(--dim);display:flex;justify-content:space-between;margin-bottom:3px;}
+    .prog-bar{height:4px;background:var(--border);border-radius:2px;overflow:hidden;}
+    .prog-fill{height:100%;background:var(--acc);border-radius:2px;transition:width .3s ease;width:0%;}
 
-    /* ─── PROGRESS / LOG ─────────────────────────────── */
-    .log-area {
-      flex: 1;
-      overflow-y: auto;
-      padding: 10px 14px;
-      font-family: var(--font-mono);
-      font-size: 11px;
-      line-height: 1.7;
-      background: var(--bg);
-    }
-    .log-line { display: flex; gap: 6px; }
-    .log-line .ts  { color: var(--text-dim); flex-shrink: 0; }
-    .log-line.ok   .msg { color: var(--accent); }
-    .log-line.info .msg { color: var(--text); }
-    .log-line.warn .msg { color: var(--warn); }
-    .log-line.err  .msg { color: var(--danger); }
+    /* status */
+    .status-chip{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;
+                 border-radius:99px;font-size:10px;font-weight:600;}
+    .chip-idle{background:#1a2a3a;color:var(--dim);}
+    .chip-running{background:#0a2e22;color:var(--acc);}
+    .chip-done{background:#0a2e22;color:var(--acc);}
+    .chip-error{background:#2e0a0a;color:var(--err);}
+    .dot{width:6px;height:6px;border-radius:50%;}
+    .chip-idle .dot{background:var(--dim);}
+    .chip-running .dot{background:var(--acc);animation:pulse 1s infinite;}
+    .chip-done .dot{background:var(--acc);}
+    .chip-error .dot{background:var(--err);}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 
-    .progress-bar-wrap {
-      padding: 8px 14px;
-      background: var(--panel);
-      border-top: 1px solid var(--border);
-    }
-    .progress-label {
-      font-size: 10px; color: var(--text-dim);
-      display: flex; justify-content: space-between;
-      margin-bottom: 4px;
-    }
-    .progress-bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
-    .progress-fill {
-      height: 100%; background: var(--accent);
-      border-radius: 2px;
-      transition: width .3s ease;
-      width: 0%;
-    }
+    /* download */
+    .dl-zone{padding:12px 14px;border-top:1px solid var(--border);display:none;}
+    .dl-zone.visible{display:block;}
+    .file-info{background:var(--bg);border:1px solid var(--border);border-radius:var(--r);
+               padding:9px;display:flex;align-items:center;gap:9px;margin-bottom:8px;}
+    .file-icon{font-size:20px;}
+    .file-meta .name{font-weight:700;color:var(--txt);font-size:11px;}
+    .file-meta .size{font-size:10px;color:var(--dim);}
 
-    /* ─── STATUS CHIPS ───────────────────────────────── */
-    .status-chip {
-      display: inline-flex; align-items: center; gap: 4px;
-      padding: 2px 8px; border-radius: 99px;
-      font-size: 10px; font-weight: 600;
-    }
-    .chip-idle    { background: #1a2a3a; color: var(--text-dim); }
-    .chip-running { background: #0a2e22; color: var(--accent); }
-    .chip-done    { background: #0a2e22; color: var(--accent); }
-    .chip-error   { background: #2e0a0a; color: var(--danger); }
-    .dot { width: 6px; height: 6px; border-radius: 50%; }
-    .chip-idle .dot    { background: var(--text-dim); }
-    .chip-running .dot { background: var(--accent); animation: pulse 1s infinite; }
-    .chip-done .dot    { background: var(--accent); }
-    .chip-error .dot   { background: var(--danger); }
-    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+    /* visualiseur */
+    #visuWrap{display:none;border-top:1px solid var(--border);padding:10px 14px;
+              background:var(--bg);}
+    #visuTitle{font-size:10px;letter-spacing:.12em;text-transform:uppercase;
+               color:var(--acc);margin-bottom:8px;}
+    #visuCanvas{max-width:100%;height:auto;border:1px solid var(--border);
+                display:block;image-rendering:pixelated;}
 
-    /* ─── DOWNLOAD ZONE ──────────────────────────────── */
-    .download-zone { padding: 14px; border-top: 1px solid var(--border); display: none; }
-    .download-zone.visible { display: block; }
-    .file-info {
-      background: var(--bg); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 10px;
-      display: flex; align-items: center; gap: 10px;
-      margin-bottom: 10px;
-    }
-    .file-icon { font-size: 22px; }
-    .file-meta .name { font-weight: 700; color: var(--text); }
-    .file-meta .size { font-size: 11px; color: var(--text-dim); }
+    /* map info */
+    .map-ov{position:absolute;bottom:20px;left:20px;
+            background:rgba(6,17,31,.85);border:1px solid var(--border);
+            border-radius:var(--r);padding:5px 9px;font-size:11px;
+            font-family:var(--mono);color:var(--dim);z-index:1000;pointer-events:none;}
 
-    /* ─── MAP INFO ───────────────────────────────────── */
-    .map-overlay-info {
-      position: absolute; bottom: 20px; left: 20px;
-      background: rgba(6,17,31,.85);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 6px 10px;
-      font-size: 11px; font-family: var(--font-mono);
-      color: var(--text-dim);
-      z-index: 1000;
-      pointer-events: none;
+    /* responsive */
+    @media(max-width:700px){
+      .panel{width:100%;position:absolute;bottom:0;left:0;right:0;height:45dvh;
+             border-left:none;border-top:1px solid var(--border);z-index:900;}
+      #map{height:55dvh;}
     }
-
-    /* ─── SCROLLBAR ──────────────────────────────────── */
-    ::-webkit-scrollbar { width: 4px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-
-    /* ─── RESPONSIVE ─────────────────────────────────── */
-    @media (max-width: 700px) {
-      .panel { width: 100%; position: absolute; bottom: 0; left: 0; right: 0; height: 45dvh; border-left: none; border-top: 1px solid var(--border); z-index: 900; }
-      .workspace { flex-direction: column; }
-      #map { height: 55dvh; }
-    }
+    ::-webkit-scrollbar{width:4px;}
+    ::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px;}
   </style>
 </head>
 <body>
@@ -282,95 +160,111 @@
 <header>
   <div>
     <div class="logo">LIDAR<span>_PENTE</span></div>
-    <div class="tagline">Pente MNT LIDAR HD · IGN Géoplateforme · MBTiles</div>
+    <div class="tagline">Irrégularités topographiques · Estran · IGN LIDAR HD</div>
   </div>
-  <div class="header-actions">
-    <span id="globalStatus" class="status-chip chip-idle"><span class="dot"></span> Prêt</span>
+  <div class="header-r">
+    <span id="globalStatus" class="status-chip chip-idle"><span class="dot"></span>Prêt</span>
   </div>
 </header>
 
 <div class="workspace">
   <div id="map"></div>
-  <div id="mapInfo" class="map-overlay-info" style="display:none"></div>
+  <div id="mapInfo" class="map-ov" style="display:none"></div>
 
   <aside class="panel">
 
-    <!-- STEP 1 : ZONE -->
-    <div class="panel-section">
-      <div class="section-title" id="step1title">
-        <span class="step-badge">1</span>
-        Sélection de la zone
+    <!-- STEP 1 : ZONE + ESTRAN -->
+    <div class="psec">
+      <div class="stitle" id="step1title"><span class="badge">1</span>Zone &amp; Estran</div>
+      <div class="cgrid">
+        <div class="cbox"><div class="clbl">Lon min</div><div class="cval" id="cLonMin">—</div></div>
+        <div class="cbox"><div class="clbl">Lon max</div><div class="cval" id="cLonMax">—</div></div>
+        <div class="cbox"><div class="clbl">Lat min</div><div class="cval" id="cLatMin">—</div></div>
+        <div class="cbox"><div class="clbl">Lat max</div><div class="cval" id="cLatMax">—</div></div>
       </div>
-      <div class="coords-grid">
-        <div class="coord-box"><div class="coord-label">Lon min</div><div class="coord-val" id="cLonMin">—</div></div>
-        <div class="coord-box"><div class="coord-label">Lon max</div><div class="coord-val" id="cLonMax">—</div></div>
-        <div class="coord-box"><div class="coord-label">Lat min</div><div class="coord-val" id="cLatMin">—</div></div>
-        <div class="coord-box"><div class="coord-label">Lat max</div><div class="coord-val" id="cLatMax">—</div></div>
+      <div class="frow2">
+        <div class="frow">
+          <label>Altitude basse (m NGF)</label>
+          <input type="number" id="bmveAlt" value="-3" step="0.5" title="Zéro hydrographique local SHOM"/>
+        </div>
+        <div class="frow">
+          <label>Altitude haute (m NGF)</label>
+          <input type="number" id="pmveAlt" value="5" step="0.5" title="PMVE"/>
+        </div>
       </div>
-      <button class="btn btn-secondary" id="btnClear" style="margin-bottom:6px" disabled>✕ Effacer la zone</button>
+      <div class="frow">
+        <label>Résolution grille MNT (m)</label>
+        <input type="number" id="mntRes" value="5" min="2" max="20" step="1"/>
+      </div>
+      <div style="display:flex;gap:6px;">
+        <button class="btn btn-secondary btn-sm" id="btnClear" style="flex:0 0 auto;width:auto;padding:5px 10px;" disabled>✕</button>
+        <button class="btn btn-primary btn-sm" id="btnEstran" style="flex:1;" disabled>Extraire l'estran →</button>
+      </div>
     </div>
 
-    <!-- STEP 2 : PARAMETRES -->
-    <div class="panel-section">
-      <div class="section-title inactive" id="step2title">
-        <span class="step-badge">2</span>
-        Paramètres pente
-      </div>
-
-      <div class="field-row">
-        <label>Zoom des tuiles (résolution)</label>
+    <!-- STEP 2 : PENTES -->
+    <div class="psec">
+      <div class="stitle inactive" id="step2title"><span class="badge">2</span>Pentes LIDAR</div>
+      <div class="frow">
+        <label>Niveau de tuile (zoom)</label>
         <select id="tileZoom">
-          <option value="12">12 — ~38 m/px</option>
           <option value="13">13 — ~19 m/px</option>
           <option value="14" selected>14 — ~10 m/px ✓ recommandé</option>
           <option value="15">15 — ~5 m/px</option>
           <option value="16">16 — ~2,4 m/px (lent)</option>
         </select>
       </div>
-
-      <div class="field-row">
-        <label>Seuil blanc (degrés) — 0° = noir, seuil° = blanc</label>
-        <input type="number" id="seuilDeg" value="45" min="1" max="90" step="1" />
-      </div>
-
       <div class="info-box">
-        💡 Chaque tuile : le MNT LIDAR 1 m/px est récupéré via WCS IGN,
-        la pente est calculée pixel par pixel (algorithme de Horn),
-        puis convertie en niveaux de gris —
-        <strong>noir = plat (0°)</strong>, <strong>blanc = seuil</strong>.<br>
-        Couverture : France métropolitaine uniquement.
+        WMTS <strong>ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES</strong><br>
+        FORMAT image/x-bil;bits=32 · WGS84G<br>
+        Pente calculée par l'algorithme de Horn (3×3)
       </div>
+      <button class="btn btn-primary btn-sm" id="btnPente" disabled>Calculer les pentes →</button>
     </div>
 
-    <!-- STEP 3 : ACTIONS -->
-    <div class="panel-section">
-      <div class="section-title inactive" id="step3title">
-        <span class="step-badge">3</span>
-        Traitement
+    <!-- STEP 3 : VISUALISEUR (injecté ici dynamiquement) -->
+    <div id="visuWrap">
+      <div id="visuTitle">Visualiseur · niveaux de gris</div>
+      <div class="slider-row">
+        <label>Min</label>
+        <input type="range" id="sMin" min="0" max="90" value="0" step="0.1"/>
+        <span class="slider-val" id="lblSMin">0.0°</span>
       </div>
-      <button class="btn btn-primary" id="btnProcess" disabled style="margin-bottom:6px">
-        ⚙ Calculer pente + Export MBTiles
-      </button>
-      <button class="btn btn-secondary" id="btnAbort" disabled>⏹ Annuler</button>
+      <div class="slider-row">
+        <label>Max</label>
+        <input type="range" id="sMax" min="0" max="90" value="45" step="0.1"/>
+        <span class="slider-val" id="lblSMax">45.0°</span>
+      </div>
+      <canvas id="visuCanvas"></canvas>
+    </div>
+
+    <!-- STEP 4 : EXPORT -->
+    <div class="psec">
+      <div class="stitle inactive" id="step4title"><span class="badge">4</span>Export MBTiles</div>
+      <div class="info-box">
+        Le MBTiles est généré avec les seuils actifs des curseurs.<br>
+        <strong>Noir</strong> = seuil min &nbsp;·&nbsp; <strong>Blanc</strong> = seuil max
+      </div>
+      <button class="btn btn-primary btn-sm" id="btnExport" disabled>Exporter MBTiles →</button>
     </div>
 
     <!-- LOG -->
-    <div class="log-area" id="logArea">
-      <div class="log-line info"><span class="ts">00:00</span><span class="msg">Bienvenue dans LIDAR_PENTE.</span></div>
-      <div class="log-line info"><span class="ts">00:00</span><span class="msg">Dessinez un rectangle sur la carte pour commencer.</span></div>
-    </div>
+    <div class="log-area" id="logArea"></div>
 
     <!-- PROGRESS -->
-    <div class="progress-bar-wrap">
-      <div class="progress-label">
+    <div class="prog-wrap">
+      <div class="prog-lbl">
         <span id="progressLabel">En attente</span>
-        <span id="progressPct">0 %</span>
+        <span id="progressPct">0%</span>
       </div>
-      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="prog-bar"><div class="prog-fill" id="progressFill"></div></div>
+    </div>
+    <div style="padding:6px 14px;border-top:1px solid var(--border);">
+      <button class="btn btn-secondary btn-sm" id="btnAbort" disabled style="margin-bottom:0;">⏹ Annuler</button>
     </div>
 
     <!-- DOWNLOAD -->
-    <div class="download-zone" id="downloadZone">
+    <div class="dl-zone" id="downloadZone">
       <div class="file-info">
         <div class="file-icon">🗂</div>
         <div class="file-meta">
@@ -378,40 +272,39 @@
           <div class="size" id="mbtSize">—</div>
         </div>
       </div>
-      <button class="btn btn-warn" id="btnDownload">⬇ Télécharger .mbtiles</button>
+      <button class="btn btn-warn" id="btnDownload">⬇ Re-télécharger</button>
     </div>
 
   </aside>
 </div>
 
-<!-- Bannière mise à jour SW -->
-<div id="swUpdateBanner" style="position:fixed;top:0;left:0;right:0;z-index:9999;
+<!-- STEP 3 inset : le canvas visualiseur est dans #visuWrap dans le panel -->
+
+<!-- SW update banner -->
+<div id="swBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;
   background:#f0a500;color:#06111f;padding:8px 16px;font-size:13px;font-weight:600;
-  align-items:center;gap:12px;justify-content:center;display:none;">
+  align-items:center;gap:12px;justify-content:center;">
   ⚡ Nouvelle version disponible —
   <button onclick="window.location.reload(true)"
     style="background:#06111f;color:#f0a500;border:none;padding:4px 12px;
-    border-radius:4px;cursor:pointer;font-weight:700;">
-    Recharger maintenant
-  </button>
+    border-radius:4px;cursor:pointer;font-weight:700;">Recharger</button>
 </div>
 
 <script>
-const APP_VERSION = '1.1.0';
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js').then(reg => {
-    reg.addEventListener('updatefound', () => {
-      const nw = reg.installing;
-      nw.addEventListener('statechange', () => {
-        if (nw.state === 'installed' && navigator.serviceWorker.controller) {
-          document.getElementById('swUpdateBanner').style.display = 'flex';
-        }
+const APP_VER='3.0.0';
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('./sw.js').then(reg=>{
+    reg.addEventListener('updatefound',()=>{
+      const nw=reg.installing;
+      nw.addEventListener('statechange',()=>{
+        if(nw.state==='installed'&&navigator.serviceWorker.controller)
+          document.getElementById('swBanner').style.display='flex';
       });
     });
   });
-  navigator.serviceWorker.addEventListener('controllerchange', () => window.location.reload());
+  navigator.serviceWorker.addEventListener('controllerchange',()=>location.reload());
 }
 </script>
-<script src="app.js?v=1.1.0"></script>
+<script src="app.js?v=3.0.0"></script>
 </body>
 </html>

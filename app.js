@@ -1,501 +1,769 @@
 /* ═══════════════════════════════════════════════════════════════
-   LIDAR_PENTE v1.2.0 — Pente MNT LIDAR IGN → MBTiles
-   Architecture identique à Platier CL v2.0.0
-   Source MNT : IGN Géoplateforme WMTS — ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES
-               Format image/x-bil;bits=32  TileMatrixSet WGS84G (EPSG:4326)
-   Calcul pente : algorithme de Horn (3×3)
-   Sortie : tuiles PNG niveaux de gris dans un MBTiles SQLite
+   LIDAR_PENTE v3.0.0
+   Détection d'irrégularités topographiques sur l'estran
+   ───────────────────────────────────────────────────────────────
+   Étape 1 : Rectangle → MNT RGE Alti → masque estran [BMVE, PMVE]
+             → polygone estran affiché sur la carte
+   Étape 2 : WMTS LIDAR BIL float32 uniquement sur les tuiles
+             intersectant l'estran → calcul pente Horn → grille pente
+   Étape 3 : Visualiseur niveaux de gris + curseurs seuil min/max
+   Étape 4 : Export MBTiles PNG
+   ───────────────────────────────────────────────────────────────
+   Déploiement : BernardHoyez.github.io/lidar
    ═══════════════════════════════════════════════════════════════ */
 'use strict';
 
 // ── CONSTANTES ─────────────────────────────────────────────────────
-// Le MNT IGN n'est PAS disponible via WCS public.
-// Il est servi via WMTS au format BIL (Binary Interleaved by Line) float32.
-// TileMatrixSet WGS84G : grille EPSG:4326, origine coin supérieur-gauche (-180, 90)
-// Niveau 0 : 2 tuiles en largeur (360° / 256px), 1 en hauteur
-// Niveau L : 2^(L+1) colonnes, 2^L lignes
-const WMTS_URL   = 'https://data.geopf.fr/wmts';
-const MNT_LAYER  = 'ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES';
-const MNT_STYLE  = 'normal';
-const MNT_TMS    = 'WGS84G';           // TileMatrixSet EPSG:4326
-const MNT_FMT    = 'image/x-bil;bits=32';
-const TILE_PX    = 256;                // pixels par tuile
-const CONCUR     = 3;                  // tuiles parallèles max
-const NODATA     = -99999;
+const IGN_ALTI  = 'https://data.geopf.fr/altimetrie/1.0/calcul/alti/rest/elevation.json';
+const IGN_WMTS  = 'https://data.geopf.fr/wmts';
+const ALTI_RES  = 'ign_rge_alti_wld';
+const MNT_LAYER = 'ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES';
+const MNT_FMT   = 'image/x-bil;bits=32';
+const MNT_TMS   = 'WGS84G';
+const TILE_PX   = 256;
+const BATCH     = 40;
+const DELAY_MS  = 230;
+const CONCUR    = 3;
+const MIN_AREA  = 1000;   // m² min pour garder un polygone
+const SIMP_TOL  = 0.00004;
 
 // ── STATE ──────────────────────────────────────────────────────────
 const ST = {
   bbox  : null,
-  ac    : null,   // AbortController
+  mask  : null, cols: 0, rows: 0,   // masque estran
+  poly  : null,                      // GeoJSON estran vectorisé
+  slope : null,                      // Float32Array pentes (coord. tuile PM)
+  tiles : null,                      // [{z,x,y}] tuiles PM sélectionnées
   mbt   : null,
+  ac    : null,
   t0    : Date.now()
 };
 
 // ── DOM ────────────────────────────────────────────────────────────
-const $      = id => document.getElementById(id);
-const logEl  = $('logArea');
-const barEl  = $('progressFill');
-const lblEl  = $('progressLabel');
-const pctEl  = $('progressPct');
-const statEl = $('globalStatus');
-const dlEl   = $('downloadZone');
+const $     = id => document.getElementById(id);
+const logEl = $('logArea');
+const barEl = $('progressFill');
+const lblEl = $('progressLabel');
+const pctEl = $('progressPct');
+const statEl= $('globalStatus');
+const dlEl  = $('downloadZone');
 
-// ── HORLOGE ────────────────────────────────────────────────────────
-function ts() {
-  const s = Math.floor((Date.now() - ST.t0) / 1000);
-  return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+function ts(){
+  const s=Math.floor((Date.now()-ST.t0)/1000);
+  return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');
 }
-
-// ── LOG ────────────────────────────────────────────────────────────
-function log(msg, lv = 'info') {
-  const d = document.createElement('div');
-  d.className = 'log-line ' + lv;
-  d.innerHTML = `<span class="ts">${ts()}</span><span class="msg">${msg}</span>`;
+function log(msg,lv='info'){
+  const d=document.createElement('div');
+  d.className='log-line '+lv;
+  d.innerHTML=`<span class="ts">${ts()}</span><span class="msg">${msg}</span>`;
   logEl.appendChild(d);
-  logEl.scrollTop = logEl.scrollHeight;
+  logEl.scrollTop=logEl.scrollHeight;
 }
-
-// ── PROGRESSION ────────────────────────────────────────────────────
-function prog(label, pct) {
-  lblEl.textContent = label;
-  pctEl.textContent = Math.round(pct) + '%';
-  barEl.style.width = Math.min(100, pct) + '%';
-  return new Promise(res => setTimeout(res, 4));
+function prog(label,pct){
+  lblEl.textContent=label;
+  pctEl.textContent=Math.round(pct)+'%';
+  barEl.style.width=Math.min(100,pct)+'%';
+  return new Promise(r=>setTimeout(r,4));
 }
-
-// ── STATUS ─────────────────────────────────────────────────────────
-function setStatus(s) {
-  const CL = { idle: 'chip-idle', run: 'chip-running', done: 'chip-done', err: 'chip-error' };
-  const LB = { idle: 'Prêt', run: 'En cours…', done: 'Terminé ✓', err: 'Erreur' };
-  statEl.className = 'status-chip ' + (CL[s] || 'chip-idle');
-  statEl.innerHTML = `<span class="dot"></span>${LB[s] || s}`;
+function setStatus(s){
+  const CL={idle:'chip-idle',run:'chip-running',done:'chip-done',err:'chip-error'};
+  const LB={idle:'Prêt',run:'En cours…',done:'Terminé ✓',err:'Erreur'};
+  statEl.className='status-chip '+(CL[s]||'chip-idle');
+  statEl.innerHTML=`<span class="dot"></span>${LB[s]||s}`;
 }
 
 // ── CARTE LEAFLET ──────────────────────────────────────────────────
-const map = L.map('map', { center: [45.0, 2.5], zoom: 10 });
-
+const map=L.map('map',{center:[50.5,1.6],zoom:11});
 L.tileLayer(
-  'https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0' +
-  '&LAYER=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2&STYLE=normal&FORMAT=image/png' +
+  IGN_WMTS+'?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0'+
+  '&LAYER=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2&STYLE=normal&FORMAT=image/png'+
   '&TILEMATRIXSET=PM&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}',
-  { attribution: '© IGN', maxZoom: 19 }
+  {attribution:'© IGN',maxZoom:19}
 ).addTo(map);
 
-const drawn = new L.FeatureGroup().addTo(map);
+const drawn=new L.FeatureGroup().addTo(map);
 map.addControl(new L.Control.Draw({
-  draw: {
-    rectangle: { shapeOptions: { color: '#00c8a0', weight: 2 } },
-    polygon: false, polyline: false, circle: false, circlemarker: false, marker: false
-  },
-  edit: { featureGroup: drawn, remove: true }
+  draw:{rectangle:{shapeOptions:{color:'#00c8a0',weight:2}},
+        polygon:false,polyline:false,circle:false,circlemarker:false,marker:false},
+  edit:{featureGroup:drawn,remove:true}
 }));
 
-map.on(L.Draw.Event.CREATED, e => {
-  drawn.clearLayers();
-  drawn.addLayer(e.layer);
-  const b = e.layer.getBounds();
-  ST.bbox = { minLon: b.getWest(), minLat: b.getSouth(), maxLon: b.getEast(), maxLat: b.getNorth() };
+let estranLyr=null;
+
+map.on(L.Draw.Event.CREATED,e=>{
+  drawn.clearLayers(); drawn.addLayer(e.layer);
+  const b=e.layer.getBounds();
+  ST.bbox={minLon:b.getWest(),minLat:b.getSouth(),maxLon:b.getEast(),maxLat:b.getNorth()};
+  resetState();
   updateCoords();
-  map.fitBounds(b, { padding: [20, 20] });
-  log(`Zone : [${ST.bbox.minLon.toFixed(4)}, ${ST.bbox.minLat.toFixed(4)}] → [${ST.bbox.maxLon.toFixed(4)}, ${ST.bbox.maxLat.toFixed(4)}]`, 'ok');
-  uiEnable(true);
+  map.fitBounds(b,{padding:[20,20]});
+  log(`Zone : [${ST.bbox.minLon.toFixed(4)}, ${ST.bbox.minLat.toFixed(4)}] → [${ST.bbox.maxLon.toFixed(4)}, ${ST.bbox.maxLat.toFixed(4)}]`,'ok');
+  uiSetPhase('bbox');
 });
-map.on(L.Draw.Event.DELETED, () => { ST.bbox = null; updateCoords(); uiEnable(false); });
+map.on(L.Draw.Event.DELETED,()=>{ST.bbox=null;resetState();updateCoords();uiSetPhase('idle');});
 
-function updateCoords() {
-  const b = ST.bbox;
-  $('cLonMin').textContent = b ? b.minLon.toFixed(4) : '—';
-  $('cLonMax').textContent = b ? b.maxLon.toFixed(4) : '—';
-  $('cLatMin').textContent = b ? b.minLat.toFixed(4) : '—';
-  $('cLatMax').textContent = b ? b.maxLat.toFixed(4) : '—';
-}
+const mapInfo=$('mapInfo');
+map.on('mousemove',e=>{mapInfo.style.display='block';mapInfo.textContent=`${e.latlng.lng.toFixed(5)}°E  ${e.latlng.lat.toFixed(5)}°N`;});
+map.on('mouseout',()=>{mapInfo.style.display='none';});
 
-function uiEnable(on) {
-  $('btnClear').disabled   = !on;
-  $('btnProcess').disabled = !on;
-  ['step2title', 'step3title'].forEach(id => $(id).classList.toggle('inactive', !on));
-}
-
-$('btnClear').addEventListener('click', () => {
-  drawn.clearLayers();
-  ST.bbox = ST.mbt = null;
+function resetState(){
+  ST.mask=ST.poly=ST.slope=ST.tiles=ST.mbt=null;
+  ST.cols=ST.rows=0;
+  if(estranLyr){map.removeLayer(estranLyr);estranLyr=null;}
   dlEl.classList.remove('visible');
-  updateCoords(); uiEnable(false);
-  prog('En attente', 0); setStatus('idle');
-  log('Zone effacée.', 'warn');
+  hideVisu();
+}
+function updateCoords(){
+  const b=ST.bbox;
+  $('cLonMin').textContent=b?b.minLon.toFixed(4):'—';
+  $('cLonMax').textContent=b?b.maxLon.toFixed(4):'—';
+  $('cLatMin').textContent=b?b.minLat.toFixed(4):'—';
+  $('cLatMax').textContent=b?b.maxLat.toFixed(4):'—';
+}
+
+// ── PHASES UI ──────────────────────────────────────────────────────
+// idle → bbox → estran → pente → visu
+function uiSetPhase(ph){
+  $('btnClear').disabled    = ph==='idle';
+  $('btnEstran').disabled   = ph!=='bbox';
+  $('btnPente').disabled    = ph!=='estran';
+  $('btnExport').disabled   = ph!=='visu';
+  ['step2title','step3title','step4title'].forEach(id=>$(id).classList.add('inactive'));
+  if(ph==='bbox'||ph==='estran'||ph==='pente'||ph==='visu') $('step2title').classList.remove('inactive');
+  if(ph==='estran'||ph==='pente'||ph==='visu')              $('step3title').classList.remove('inactive');
+  if(ph==='visu')                                            $('step4title').classList.remove('inactive');
+  $('btnAbort').disabled=true;
+}
+uiSetPhase('idle');
+
+$('btnClear').addEventListener('click',()=>{
+  drawn.clearLayers();
+  ST.bbox=null;
+  resetState();
+  updateCoords();
+  uiSetPhase('idle');
+  prog('En attente',0);setStatus('idle');
+  log('Zone effacée.','warn');
 });
-
-const mapInfo = $('mapInfo');
-map.on('mousemove', e => {
-  mapInfo.style.display = 'block';
-  mapInfo.textContent = `${e.latlng.lng.toFixed(5)}°E  ${e.latlng.lat.toFixed(5)}°N`;
-});
-map.on('mouseout', () => { mapInfo.style.display = 'none'; });
-
-// ══════════════════════════════════════════════════════════════════
-//  SYSTÈME DE TUILES WGS84G (EPSG:4326)
-//  Le TileMatrixSet WGS84G de l'IGN utilise une grille géographique :
-//  - Origine : coin supérieur-gauche (-180°, 90°)
-//  - Niveau L : nCols = 2^(L+1), nLignes = 2^L
-//  - Tuile (col, row) couvre : lon ∈ [minLon, maxLon], lat ∈ [minLat, maxLat]
-//  À NE PAS confondre avec le TileMatrixSet PM (Pseudo-Mercator) utilisé
-//  par la carte de fond Leaflet.
-// ══════════════════════════════════════════════════════════════════
-
-// Nombre de colonnes et lignes au niveau L
-const wgs84Cols = L => 1 << (L + 1);   // 2^(L+1)
-const wgs84Rows = L => 1 << L;          // 2^L
-
-// Lon/Lat → indices tuile WGS84G
-function ll2wgs84(lon, lat, L) {
-  const nCols = wgs84Cols(L);
-  const nRows = wgs84Rows(L);
-  const col = Math.floor((lon + 180) / 360 * nCols);
-  const row = Math.floor((90 - lat)  / 180 * nRows);
-  return { col: Math.max(0, Math.min(nCols - 1, col)),
-           row: Math.max(0, Math.min(nRows - 1, row)) };
-}
-
-// BBox géographique d'une tuile WGS84G
-function wgs84TileBBox(col, row, L) {
-  const nCols = wgs84Cols(L);
-  const nRows = wgs84Rows(L);
-  return {
-    minLon:  col      / nCols * 360 - 180,
-    maxLon: (col + 1) / nCols * 360 - 180,
-    maxLat: 90 -  row      / nRows * 180,
-    minLat: 90 - (row + 1) / nRows * 180,
-  };
-}
-
-// Liste des tuiles WGS84G couvrant une bbox, au niveau L
-function bboxToTileList(bbox, L) {
-  const tl = ll2wgs84(bbox.minLon, bbox.maxLat, L);
-  const br = ll2wgs84(bbox.maxLon, bbox.minLat, L);
-  const out = [];
-  for (let col = tl.col; col <= br.col; col++)
-    for (let row = tl.row; row <= br.row; row++)
-      out.push({ L, col, row });
-  return out;
-}
 
 // ── FETCH AVEC ABORT ───────────────────────────────────────────────
-async function apiFetch(url) {
-  if (!ST.ac || ST.ac.signal.aborted) throw new Error('Annulé');
-  const r = await fetch(url, { signal: ST.ac.signal });
-  if (!r.ok) throw new Error(`HTTP ${r.status} — ${url.slice(0, 100)}`);
+async function apiFetch(url){
+  if(!ST.ac||ST.ac.signal.aborted) throw new Error('Annulé');
+  const r=await fetch(url,{signal:ST.ac.signal});
+  if(!r.ok) throw new Error(`HTTP ${r.status} — ${url.slice(0,80)}`);
   return r;
 }
 
-// ── PARSER BIL (Binary Interleaved by Line) float32 ───────────────
-// Le format image/x-bil;bits=32 est du float32 little-endian brut,
-// TILE_PX × TILE_PX valeurs, sans en-tête.
-function parseBIL(buf) {
-  const W = TILE_PX, H = TILE_PX;
-  if (buf.byteLength < W * H * 4) {
-    throw new Error(`BIL trop court : ${buf.byteLength} bytes (attendu ${W*H*4})`);
+// ═══════════════════════════════════════════════════════════════════
+//  ÉTAPE 1 : ESTRAN
+//  MNT RGE Alti → masque [BMVE, PMVE] → polygone → carte
+// ═══════════════════════════════════════════════════════════════════
+
+// ── MNT RGE Alti (API REST) ────────────────────────────────────────
+async function getMNT(bbox,res){
+  const latM=(bbox.minLat+bbox.maxLat)/2;
+  const dLon=res/(111320*Math.cos(latM*Math.PI/180));
+  const dLat=res/111320;
+  const MAXD=80;
+  const cols=Math.min(MAXD,Math.max(2,Math.round((bbox.maxLon-bbox.minLon)/dLon)+1));
+  const rows=Math.min(MAXD,Math.max(2,Math.round((bbox.maxLat-bbox.minLat)/dLat)+1));
+  const sLon=(bbox.maxLon-bbox.minLon)/(cols-1);
+  const sLat=(bbox.maxLat-bbox.minLat)/(rows-1);
+  const total=cols*rows;
+  const nReq=Math.ceil(total/BATCH);
+  log(`Grille MNT ${cols}×${rows} pts — ${nReq} requêtes alti`,'info');
+  await prog(`Altimétrie 0/${total} pts`,5);
+  const grid=new Float32Array(total).fill(NaN);
+  let fetched=0;
+  for(let i=0;i<total;i+=BATCH){
+    if(ST.ac.signal.aborted) throw new Error('Annulé');
+    const sz=Math.min(BATCH,total-i);
+    const lons=[],lats=[];
+    for(let j=0;j<sz;j++){
+      const idx=i+j, c=idx%cols, r=Math.floor(idx/cols);
+      lons.push(bbox.minLon+c*sLon);
+      lats.push(bbox.maxLat-r*sLat);
+    }
+    const url=IGN_ALTI+'?'+new URLSearchParams({
+      lon:lons.map(v=>v.toFixed(6)).join('|'),
+      lat:lats.map(v=>v.toFixed(6)).join('|'),
+      resource:ALTI_RES,delimiter:'|',indent:'false',measures:'false',zonly:'false'
+    });
+    try{
+      const d=await (await apiFetch(url)).json();
+      (d.elevations||[]).forEach((e,j)=>{
+        const z=e.z;
+        grid[i+j]=(z==null||z<=-99990)?NaN:Number(z);
+      });
+    }catch(e){
+      if(e.message==='Annulé') throw e;
+      log(`Req ${Math.ceil(i/BATCH)+1}/${nReq} échouée : ${e.message}`,'warn');
+    }
+    fetched+=sz;
+    await prog(`Altimétrie ${fetched}/${total} pts`,5+25*(fetched/total));
+    if(i+BATCH<total) await new Promise(r=>setTimeout(r,DELAY_MS));
   }
-  // float32 little-endian
-  return new Float32Array(buf, 0, W * H);
+  let vmin=Infinity,vmax=-Infinity,nv=0;
+  for(const v of grid) if(!isNaN(v)){if(v<vmin)vmin=v;if(v>vmax)vmax=v;nv++;}
+  log(`MNT : ${nv}/${total} pts valides — alt. ${vmin.toFixed(2)} / ${vmax.toFixed(2)} m NGF`,'ok');
+  return{grid,cols,rows};
 }
 
-// ── ALGORITHME DE HORN — pente en degrés ───────────────────────────
-function computeSlope(elev, w, h, cellSizeM) {
-  const slope = new Float32Array(w * h);
-  for (let r = 1; r < h - 1; r++) {
-    for (let c = 1; c < w - 1; c++) {
-      const i = r * w + c;
-      if (elev[i] <= NODATA) continue;
-      const fix = v => (v <= NODATA ? elev[i] : v);
-      const a = fix(elev[(r-1)*w+(c-1)]), b = fix(elev[(r-1)*w+c]), cc = fix(elev[(r-1)*w+(c+1)]);
-      const d = fix(elev[r*w+(c-1)]),                                 f  = fix(elev[r*w+(c+1)]);
-      const g = fix(elev[(r+1)*w+(c-1)]), hh= fix(elev[(r+1)*w+c]), ii = fix(elev[(r+1)*w+(c+1)]);
-      const dzdx = ((cc + 2*f + ii) - (a + 2*d + g)) / (8 * cellSizeM);
-      const dzdy = ((g + 2*hh + ii) - (a + 2*b + cc)) / (8 * cellSizeM);
-      slope[i] = Math.atan(Math.sqrt(dzdx*dzdx + dzdy*dzdy)) * 180 / Math.PI;
+// ── Masque estran ──────────────────────────────────────────────────
+function makeMaskEstran(grid,cols,rows,bmve,pmve){
+  const m=new Uint8Array(cols*rows);
+  for(let i=0;i<grid.length;i++){
+    const v=grid[i];
+    if(!isNaN(v)&&v>=bmve&&v<=pmve) m[i]=1;
+  }
+  // NaN entourés de valeurs ≤ bmve → mer ouverte → inclure
+  for(let r=0;r<rows;r++){
+    for(let c=0;c<cols;c++){
+      const i=r*cols+c;
+      if(!isNaN(grid[i])) continue;
+      const nb=[];
+      if(c>0)      nb.push(grid[i-1]);
+      if(c<cols-1) nb.push(grid[i+1]);
+      if(r>0)      nb.push(grid[i-cols]);
+      if(r<rows-1) nb.push(grid[i+cols]);
+      const valid=nb.filter(x=>!isNaN(x));
+      if(valid.length>0&&valid.every(x=>x<=bmve)) m[i]=1;
+    }
+  }
+  return m;
+}
+
+// ── Marching Squares ───────────────────────────────────────────────
+function maskToSegs(mask,cols,rows,bbox){
+  const cW=(bbox.maxLon-bbox.minLon)/cols;
+  const cH=(bbox.maxLat-bbox.minLat)/rows;
+  const p2w=([px,py])=>[bbox.minLon+px*cW,bbox.maxLat-py*cH];
+  const segs=[];
+  for(let r=0;r<rows-1;r++){
+    for(let c=0;c<cols-1;c++){
+      const tl=mask[r*cols+c],tr=mask[r*cols+c+1];
+      const bl=mask[(r+1)*cols+c],br=mask[(r+1)*cols+c+1];
+      const idx=(tl<<3)|(tr<<2)|(br<<1)|bl;
+      if(idx===0||idx===15) continue;
+      const T=[c+.5,r],B=[c+.5,r+1],L=[c,r+.5],R=[c+1,r+.5];
+      const T_={1:[[L,B]],2:[[B,R]],3:[[L,R]],4:[[T,R]],
+                5:[[T,R],[B,L]],6:[[T,B]],7:[[T,L]],
+                8:[[T,L]],9:[[T,B]],10:[[T,L],[B,R]],
+                11:[[T,R]],12:[[L,R]],13:[[B,R]],14:[[L,B]]};
+      for(const s of (T_[idx]||[])) segs.push([p2w(s[0]),p2w(s[1])]);
+    }
+  }
+  return segs;
+}
+function assembleRings(segs){
+  if(!segs.length) return [];
+  const EPS=1e-9;
+  const eq=([ax,ay],[bx,by])=>Math.abs(ax-bx)<EPS&&Math.abs(ay-by)<EPS;
+  const used=new Uint8Array(segs.length);
+  const rings=[];
+  for(let s=0;s<segs.length;s++){
+    if(used[s]) continue;
+    used[s]=1;
+    const ring=[segs[s][0],segs[s][1]];
+    let go=true;
+    while(go){
+      go=false;
+      const tail=ring[ring.length-1];
+      for(let j=0;j<segs.length;j++){
+        if(used[j]) continue;
+        if(eq(segs[j][0],tail)){ring.push(segs[j][1]);used[j]=1;go=true;break;}
+        if(eq(segs[j][1],tail)){ring.push(segs[j][0]);used[j]=1;go=true;break;}
+      }
+    }
+    if(ring.length>=4) rings.push(ring);
+  }
+  return rings;
+}
+const eq2=(a,b)=>Math.abs(a[0]-b[0])<1e-9&&Math.abs(a[1]-b[1])<1e-9;
+function dropSmall(gj){
+  if(!gj) return null;
+  const t=gj.geometry.type;
+  if(t==='Polygon') return turf.area(gj)>=MIN_AREA?gj:null;
+  if(t==='MultiPolygon'){
+    const ok=gj.geometry.coordinates.filter(c=>turf.area(turf.polygon(c))>=MIN_AREA);
+    if(!ok.length) return null;
+    return ok.length===1?turf.polygon(ok[0]):turf.multiPolygon(ok);
+  }
+  return gj;
+}
+function maskToGeoJSON(mask,cols,rows,bbox){
+  const segs=maskToSegs(mask,cols,rows,bbox);
+  if(!segs.length) return null;
+  const rings=assembleRings(segs);
+  if(!rings.length) return null;
+  log(`${rings.length} anneau(x) extraits`,'info');
+  const closed=rings.map(r=>{
+    const rr=[...r];
+    if(!eq2(rr[0],rr[rr.length-1])) rr.push(rr[0]);
+    return rr;
+  }).filter(r=>r.length>=4);
+  if(!closed.length) return null;
+  const gj=closed.length===1?turf.polygon([closed[0]]):turf.multiPolygon(closed.map(r=>[r]));
+  let simp;
+  try{simp=turf.simplify(gj,{tolerance:SIMP_TOL,highQuality:false});}
+  catch{simp=gj;}
+  return dropSmall(simp);
+}
+
+// ── Tuiles XYZ PM depuis masque ────────────────────────────────────
+const lon2x=(lon,z)=>Math.floor((lon+180)/360*(1<<z));
+const lat2y=(lat,z)=>Math.floor((1-Math.log(Math.tan(lat*Math.PI/180)+1/Math.cos(lat*Math.PI/180))/Math.PI)/2*(1<<z));
+
+function tilesFromMask(mask,cols,rows,bbox,zoom){
+  const cW=(bbox.maxLon-bbox.minLon)/cols;
+  const cH=(bbox.maxLat-bbox.minLat)/rows;
+  const tileSet=new Set();
+  for(let r=0;r<rows;r++){
+    for(let c=0;c<cols;c++){
+      if(!mask[r*cols+c]) continue;
+      const lon=bbox.minLon+(c+0.5)*cW;
+      const lat=bbox.maxLat-(r+0.5)*cH;
+      const tx=lon2x(lon,zoom),ty=lat2y(lat,zoom);
+      tileSet.add(`${zoom}/${tx}/${ty}`);
+      for(let dx=-1;dx<=1;dx++) for(let dy=-1;dy<=1;dy++){
+        if(dx||dy) tileSet.add(`${zoom}/${tx+dx}/${ty+dy}`);
+      }
+    }
+  }
+  return [...tileSet].map(k=>{const[z,x,y]=k.split('/').map(Number);return{z,x,y};});
+}
+
+// ── PIPELINE ÉTAPE 1 ───────────────────────────────────────────────
+$('btnEstran').addEventListener('click',async()=>{
+  if(!ST.bbox) return;
+  ST.t0=Date.now();
+  ST.ac=new AbortController();
+  $('btnEstran').disabled=true;
+  $('btnAbort').disabled=false;
+  setStatus('run');
+  resetState();
+
+  const bmve=parseFloat($('bmveAlt').value)||=-3;
+  const pmve=parseFloat($('pmveAlt').value)||5;
+  const res =parseInt($('mntRes').value)||5;
+  log(`▶ Étape 1 — BMVE=${bmve}m  PMVE=${pmve}m  résol=${res}m`,'info');
+
+  try{
+    await prog('Téléchargement altimétrie RGE Alti…',5);
+    const{grid,cols,rows}=await getMNT(ST.bbox,res);
+
+    await prog('Construction masque estran…',33);
+    const mask=makeMaskEstran(grid,cols,rows,bmve,pmve);
+    const nCells=mask.reduce((s,v)=>s+v,0);
+    log(`Masque estran : ${nCells}/${cols*rows} cellules`,'info');
+    if(!nCells) throw new Error(`Aucune cellule entre ${bmve} m et ${pmve} m NGF.`);
+
+    await prog('Vectorisation…',38);
+    const poly=maskToGeoJSON(mask,cols,rows,ST.bbox);
+    if(!poly) throw new Error('Vectorisation échouée — élargissez la zone ou ajustez les seuils.');
+
+    ST.mask=mask; ST.cols=cols; ST.rows=rows; ST.poly=poly;
+    const ha=(turf.area(poly)/10000).toFixed(1);
+    log(`Polygone estran : ${ha} ha`,'ok');
+
+    estranLyr=L.geoJSON(poly,{
+      style:{color:'#00c8a0',weight:2,fillColor:'#00c8a0',fillOpacity:0.22}
+    }).addTo(map);
+
+    await prog('✓ Étape 1 terminée',100);
+    setStatus('done');
+    uiSetPhase('estran');
+    log('✓ Estran extrait. Lancez l\'extraction des pentes.','ok');
+
+  }catch(e){
+    if(e.message==='Annulé'){log('Annulé.','warn');setStatus('idle');await prog('Annulé',0);}
+    else{log('ERREUR : '+e.message,'err');setStatus('err');await prog('Erreur',0);}
+  }finally{
+    $('btnEstran').disabled=(ST.phase==='idle');
+    $('btnAbort').disabled=true;
+    ST.ac=null;
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+//  ÉTAPE 2 : PENTES
+//  WMTS LIDAR BIL → pente Horn → grille Float32Array
+//  uniquement sur les tuiles intersectant l'estran
+// ═══════════════════════════════════════════════════════════════════
+
+// TileMatrixSet WGS84G ──────────────────────────────────────────────
+const wgs84Cols=L=>1<<(L+1);
+const wgs84Rows=L=>1<<L;
+function ll2wgs84(lon,lat,L){
+  const nC=wgs84Cols(L),nR=wgs84Rows(L);
+  return{
+    col:Math.max(0,Math.min(nC-1,Math.floor((lon+180)/360*nC))),
+    row:Math.max(0,Math.min(nR-1,Math.floor((90-lat)/180*nR)))
+  };
+}
+function wgs84TileBBox(col,row,L){
+  const nC=wgs84Cols(L),nR=wgs84Rows(L);
+  return{minLon:col/nC*360-180,maxLon:(col+1)/nC*360-180,
+         maxLat:90-row/nR*180, minLat:90-(row+1)/nR*180};
+}
+// Résolution d'une tuile WGS84G en m/px
+function tileResWGS84(row,L){
+  const nR=wgs84Rows(L);
+  return 180/nR/TILE_PX*111320;
+}
+
+// BIL float32 → Float32Array ───────────────────────────────────────
+async function fetchBIL(col,row,L){
+  const url=IGN_WMTS
+    +`?SERVICE=WMTS&VERSION=1.0.0&REQUEST=GetTile`
+    +`&LAYER=${MNT_LAYER}&STYLE=normal`
+    +`&FORMAT=${encodeURIComponent(MNT_FMT)}`
+    +`&TILEMATRIXSET=${MNT_TMS}`
+    +`&TILEMATRIX=${L}&TILEROW=${row}&TILECOL=${col}`;
+  const resp=await apiFetch(url);
+  const ct=resp.headers.get('content-type')||'';
+  if(ct.includes('xml')||ct.includes('html')||ct.includes('text')){
+    const txt=await resp.text();
+    throw new Error(`WMTS erreur: ${txt.slice(0,100)}`);
+  }
+  const buf=await resp.arrayBuffer();
+  if(buf.byteLength<TILE_PX*TILE_PX*4)
+    throw new Error(`BIL trop court (${buf.byteLength}b) — hors couverture ?`);
+  return new Float32Array(buf,0,TILE_PX*TILE_PX);
+}
+
+// Algorithme de Horn ───────────────────────────────────────────────
+function hornSlope(elev,w,h,cellM){
+  const slope=new Float32Array(w*h).fill(NaN);
+  const NODATA=-99999;
+  for(let r=1;r<h-1;r++){
+    for(let c=1;c<w-1;c++){
+      const i=r*w+c;
+      if(elev[i]<=NODATA) continue;
+      const fix=v=>(v<=NODATA?elev[i]:v);
+      const a=fix(elev[(r-1)*w+(c-1)]),b=fix(elev[(r-1)*w+c]),cc=fix(elev[(r-1)*w+(c+1)]);
+      const d=fix(elev[r*w+(c-1)]),                             f=fix(elev[r*w+(c+1)]);
+      const g=fix(elev[(r+1)*w+(c-1)]),hh=fix(elev[(r+1)*w+c]),ii=fix(elev[(r+1)*w+(c+1)]);
+      const dzdx=((cc+2*f+ii)-(a+2*d+g))/(8*cellM);
+      const dzdy=((g+2*hh+ii)-(a+2*b+cc))/(8*cellM);
+      slope[i]=Math.atan(Math.sqrt(dzdx*dzdx+dzdy*dzdy))*180/Math.PI;
     }
   }
   return slope;
 }
 
-// ── SLOPE → PNG niveaux de gris ────────────────────────────────────
-async function slopeToPNG(slope, w, h, seuilDeg) {
-  let canvas;
-  if (typeof OffscreenCanvas !== 'undefined') {
-    canvas = new OffscreenCanvas(w, h);
-  } else {
-    canvas = document.createElement('canvas');
-    canvas.width = w; canvas.height = h;
+// Convertit {z,x,y} PM → tuile WGS84G la plus proche au niveau L
+function pm2wgs84(x,y,z,L){
+  const n=1<<z;
+  const lon=x/n*360-180+(0.5/n*360); // centre tuile PM
+  const lat=Math.atan(Math.sinh(Math.PI*(1-2*(y+0.5)/n)))*180/Math.PI;
+  return ll2wgs84(lon,lat,L);
+}
+
+// Cache des tuiles BIL déjà téléchargées (clé "L/col/row")
+const bilCache=new Map();
+
+async function fetchBILcached(col,row,L){
+  const k=`${L}/${col}/${row}`;
+  if(bilCache.has(k)) return bilCache.get(k);
+  const bil=await fetchBIL(col,row,L);
+  bilCache.set(k,bil);
+  return bil;
+}
+
+// Rendu d'une tuile PM en canvas niveaux de gris selon seuils
+function renderTilePNG(slope,sMin,sMax){
+  const canvas=document.createElement('canvas');
+  canvas.width=canvas.height=TILE_PX;
+  const ctx=canvas.getContext('2d');
+  const id=ctx.createImageData(TILE_PX,TILE_PX);
+  const px=id.data;
+  const range=sMax-sMin||1;
+  for(let i=0;i<TILE_PX*TILE_PX;i++){
+    const v=slope[i];
+    let g=0;
+    if(!isNaN(v)&&v>=sMin&&v<=sMax) g=Math.round((v-sMin)/range*255);
+    else if(!isNaN(v)&&v>sMax) g=255;
+    px[i*4]=px[i*4+1]=px[i*4+2]=g;
+    px[i*4+3]=255;
   }
-  const ctx = canvas.getContext('2d');
-  const id  = ctx.createImageData(w, h);
-  const px  = id.data;
-  const k   = 255 / seuilDeg;
-  for (let i = 0; i < w * h; i++) {
-    const g = slope[i] <= 0 ? 0 : Math.min(255, Math.round(slope[i] * k));
-    px[i*4] = px[i*4+1] = px[i*4+2] = g;
-    px[i*4+3] = 255;
-  }
-  ctx.putImageData(id, 0, 0);
-  if (typeof OffscreenCanvas !== 'undefined') {
-    const blob = await canvas.convertToBlob({ type: 'image/png' });
+  ctx.putImageData(id,0,0);
+  return canvas;
+}
+
+async function canvasToPNG(canvas){
+  if(typeof OffscreenCanvas!=='undefined'){
+    const oc=new OffscreenCanvas(TILE_PX,TILE_PX);
+    oc.getContext('2d').drawImage(canvas,0,0);
+    const blob=await oc.convertToBlob({type:'image/png'});
     return new Uint8Array(await blob.arrayBuffer());
-  } else {
-    const b64 = canvas.toDataURL('image/png').split(',')[1];
-    const bin = atob(b64);
-    const arr = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-    return arr;
   }
+  const b64=canvas.toDataURL('image/png').split(',')[1];
+  const bin=atob(b64);
+  const arr=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+  return arr;
 }
 
-// ── RÉSOLUTION D'UNE TUILE WGS84G EN M/PX ─────────────────────────
-// WGS84G niveau L : chaque tuile couvre 180°/2^L en latitude
-// → hauteur en degrés = 180/2^L, en m = 180/2^L * 111320 m/°
-// → résolution = hauteur_m / TILE_PX
-function tileResolutionWGS84(row, L) {
-  const nRows  = wgs84Rows(L);
-  const latCtr = 90 - (row + 0.5) / nRows * 180;
-  // taille angulaire d'un pixel en degrés lat
-  const degPerPx = 180 / nRows / TILE_PX;
-  return degPerPx * 111320;  // m/px (valeur approx., latitude peu affecte en France)
-}
+// Stockage des pentes par tuile PM (pour le visualiseur + export)
+// ST.tileSlopes : Map<"z/x/y", Float32Array>
+// ST.tileCanvases: Map<"z/x/y", HTMLCanvasElement>
 
-// ── FETCH TUILE MNT via WMTS WGS84G ───────────────────────────────
-async function fetchMNTtile(col, row, L) {
-  const url = WMTS_URL
-    + `?SERVICE=WMTS&VERSION=1.0.0&REQUEST=GetTile`
-    + `&LAYER=${MNT_LAYER}`
-    + `&STYLE=${MNT_STYLE}`
-    + `&FORMAT=${encodeURIComponent(MNT_FMT)}`
-    + `&TILEMATRIXSET=${MNT_TMS}`
-    + `&TILEMATRIX=${L}`
-    + `&TILEROW=${row}`
-    + `&TILECOL=${col}`;
+$('btnPente').addEventListener('click',async()=>{
+  if(!ST.mask) return;
+  ST.t0=Date.now();
+  ST.ac=new AbortController();
+  $('btnPente').disabled=true;
+  $('btnAbort').disabled=false;
+  setStatus('run');
+  hideVisu();
+  dlEl.classList.remove('visible');
 
-  const resp = await apiFetch(url);
+  const zoom=parseInt($('tileZoom').value)||14;
+  log(`▶ Étape 2 — WMTS LIDAR BIL — niveau WGS84G≈${zoom}`,'info');
 
-  const ct = resp.headers.get('content-type') || '';
-  if (ct.includes('xml') || ct.includes('html') || ct.includes('text')) {
-    const txt = await resp.text();
-    throw new Error(`WMTS erreur (${ct}) : ${txt.slice(0, 200)}`);
-  }
+  try{
+    await prog('Sélection tuiles depuis masque estran…',1);
+    const tilesXYZ=tilesFromMask(ST.mask,ST.cols,ST.rows,ST.bbox,zoom);
+    log(`${tilesXYZ.length} tuile(s) PM intersectant l'estran`,'ok');
+    if(!tilesXYZ.length) throw new Error('Aucune tuile sélectionnée.');
+    if(tilesXYZ.length>2000) log(`⚠ ${tilesXYZ.length} tuiles — peut être long.`,'warn');
+    ST.tiles=tilesXYZ;
 
-  const buf = await resp.arrayBuffer();
-  if (buf.byteLength < TILE_PX * TILE_PX * 4) {
-    throw new Error(`Réponse trop courte (${buf.byteLength} bytes) — tuile hors couverture ?`);
-  }
-  return parseBIL(buf);
-}
+    ST.tileSlopes=new Map();
+    ST.tileCanvases=new Map();
+    bilCache.clear();
 
-// ── CONSTRUIRE MBTILES PENTE ───────────────────────────────────────
-// Les tuiles MBTiles sont stockées en convention XYZ PM (Pseudo-Mercator),
-// car c'est ce que QGIS/MapTiler/TileServer attend.
-// On convertit chaque tuile WGS84G → rendu PNG → réindexe en XYZ PM.
-async function buildMBT(tiles, zoom, seuilDeg) {
-  await prog('Chargement sql.js…', 10);
-  log('sql.js : chargement SQLite WASM…', 'info');
+    const total=tilesXYZ.length;
+    let done=0,errs=0;
 
-  const SQL = await initSqlJs({
-    locateFile: f => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.2/${f}`
-  });
-  const db = new SQL.Database();
-
-  db.run('CREATE TABLE metadata(name TEXT, value TEXT)');
-  db.run('CREATE TABLE tiles(zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, tile_data BLOB, PRIMARY KEY(zoom_level,tile_column,tile_row))');
-  db.run('CREATE UNIQUE INDEX tidx ON tiles(zoom_level,tile_column,tile_row)');
-
-  for (const [k, v] of [
-    ['name',        'LIDAR Pente IGN'],
-    ['type',        'baselayer'],
-    ['version',     '1'],
-    ['description', `Pente MNT LIDAR IGN — seuil blanc ${seuilDeg}° — zoom ${zoom}`],
-    ['format',      'png'],
-    ['minzoom',     String(zoom)],
-    ['maxzoom',     String(zoom)],
-  ]) db.run('INSERT INTO metadata VALUES(?,?)', [k, v]);
-
-  const ins   = db.prepare('INSERT OR REPLACE INTO tiles VALUES(?,?,?,?)');
-  const total = tiles.length;
-  let done = 0, inserted = 0, errs = 0;
-  let diagDone = false;
-
-  const firstRes = tileResolutionWGS84(tiles[0].row, tiles[0].L).toFixed(1);
-  log(`${total} tuile(s) WGS84G — niveau ${zoom} — ~${firstRes} m/px`, 'info');
-
-  for (let i = 0; i < total; i += CONCUR) {
-    if (ST.ac.signal.aborted) throw new Error('Annulé');
-
-    const batch = tiles.slice(i, i + CONCUR);
-
-    const results = await Promise.allSettled(
-      batch.map(async ({ L, col, row }) => {
-        const elev  = await fetchMNTtile(col, row, L);   // Float32Array 256×256
-        const cellM = tileResolutionWGS84(row, L);
-        const slope = computeSlope(elev, TILE_PX, TILE_PX, cellM);
-        const png   = await slopeToPNG(slope, TILE_PX, TILE_PX, seuilDeg);
-
-        // Convertir WGS84G (col, row, L) → XYZ PM (xPM, yPM) pour MBTiles
-        // On utilise le centre de la tuile WGS84G comme référence
-        const bb     = wgs84TileBBox(col, row, L);
-        const cLon   = (bb.minLon + bb.maxLon) / 2;
-        const cLat   = (bb.minLat + bb.maxLat) / 2;
-        const nPM    = 1 << zoom;
-        const xPM    = Math.floor((cLon + 180) / 360 * nPM);
-        const yPM_xyz = Math.floor(
-          (1 - Math.log(Math.tan(cLat * Math.PI / 180) + 1 / Math.cos(cLat * Math.PI / 180)) / Math.PI) / 2 * nPM
-        );
-        const yPM_tms = nPM - 1 - yPM_xyz;   // convention TMS (Y inversé)
-
-        // Stats élévatoires pour le diagnostic
-        let mn = Infinity, mx = -Infinity;
-        for (let p = 0; p < elev.length; p++) {
-          if (elev[p] > NODATA) { mn = Math.min(mn, elev[p]); mx = Math.max(mx, elev[p]); }
-        }
-        return { L, col, row, xPM, yPM_tms, png, elevMin: mn, elevMax: mx };
-      })
-    );
-
-    for (let j = 0; j < batch.length; j++) {
-      done++;
-      const { L, col, row } = batch[j];
-
-      if (results[j].status === 'fulfilled') {
-        const { xPM, yPM_tms, png, elevMin, elevMax } = results[j].value;
-
-        if (!diagDone) {
-          diagDone = true;
-          log(`Diag 1ère tuile L${L}/${col}/${row} → PM z${zoom}/${xPM}/${yPM_tms} — BIL OK — élév [${elevMin.toFixed(1)}, ${elevMax.toFixed(1)}] m — PNG ${png.length} bytes`, 'info');
-        }
-
-        try {
-          ins.run([zoom, xPM, yPM_tms, Array.from(png)]);
-          inserted++;
-        } catch (sqlErr) {
+    for(let i=0;i<total;i+=CONCUR){
+      if(ST.ac.signal.aborted) throw new Error('Annulé');
+      const batch=tilesXYZ.slice(i,i+CONCUR);
+      const results=await Promise.allSettled(batch.map(async({z,x,y})=>{
+        // Convertir tuile PM → tuile WGS84G
+        const{col,row}=pm2wgs84(x,y,z,z);
+        const elev=await fetchBILcached(col,row,z);
+        const cellM=tileResWGS84(row,z);
+        const slope=hornSlope(elev,TILE_PX,TILE_PX,cellM);
+        return{z,x,y,slope};
+      }));
+      for(let j=0;j<batch.length;j++){
+        done++;
+        if(results[j].status==='fulfilled'){
+          const{z,x,y,slope}=results[j].value;
+          ST.tileSlopes.set(`${z}/${x}/${y}`,slope);
+        }else{
           errs++;
-          log(`✗ SQL L${L}/${col}/${row} : ${sqlErr.message}`, 'err');
+          const{z,x,y}=batch[j];
+          log(`✗ ${z}/${x}/${y} : ${results[j].reason?.message}`,'warn');
         }
-      } else {
-        errs++;
-        log(`✗ WMTS L${L}/${col}/${row} : ${results[j].reason?.message}`, 'warn');
       }
+      await prog(`Pentes ${done}/${total}${errs?` (${errs} err)`:''}`,2+93*(done/total));
     }
 
-    await prog(
-      `Tuiles ${done}/${total} — ${inserted} insérées${errs ? ` (${errs} erreurs)` : ''}`,
-      15 + 80 * (done / total)
-    );
-  }
+    if(ST.tileSlopes.size===0) throw new Error(`Aucune pente calculée (${errs} erreurs).`);
 
-  ins.free();
+    // Stats globales
+    let pmin=Infinity,pmax=-Infinity;
+    for(const slope of ST.tileSlopes.values())
+      for(const v of slope) if(!isNaN(v)){pmin=Math.min(pmin,v);pmax=Math.max(pmax,v);}
+    log(`Pentes calculées sur ${ST.tileSlopes.size} tuile(s) — [${pmin.toFixed(1)}°, ${pmax.toFixed(1)}°]`,'ok');
 
-  if (inserted === 0) {
-    db.close();
-    throw new Error(`Aucune tuile insérée sur ${total} (${errs} erreurs). Zone hors couverture LIDAR IGN ?`);
-  }
+    // Initialiser les curseurs sur la plage réelle
+    $('sMin').min=$('sMax').min=pmin.toFixed(1);
+    $('sMin').max=$('sMax').max=pmax.toFixed(1);
+    $('sMin').value=pmin.toFixed(1);
+    $('sMax').value=pmax.toFixed(1);
+    updateSliderLabels();
 
-  log(`SQLite : ${inserted}/${total} tuiles — export…`, inserted < total ? 'warn' : 'ok');
-  await prog('Export SQLite…', 97);
+    await prog('✓ Étape 2 terminée',100);
+    setStatus('done');
+    uiSetPhase('visu');
+    renderVisu();
+    log('✓ Pentes calculées. Ajustez les curseurs pour affiner les contrastes.','ok');
 
-  const raw  = db.export();
-  const data = raw.slice();
-  db.close();
-
-  if (data.byteLength < 4096) throw new Error(`Export SQLite anormalement petit (${data.byteLength} bytes).`);
-  return data;
-}
-
-// ── DÉCLENCHEUR TÉLÉCHARGEMENT ─────────────────────────────────────
-function triggerDL(data, zoom, seuilDeg) {
-  try {
-    const blob = new Blob([data], { type: 'application/x-sqlite3' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href = url;
-    a.download = `lidar_pente_z${zoom}_s${seuilDeg}.mbtiles`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
-    log('⬇ Téléchargement déclenché', 'ok');
-  } catch (e) {
-    log('Erreur téléchargement : ' + e.message, 'err');
-  }
-}
-
-$('btnDownload').addEventListener('click', () => {
-  if (ST.mbt) {
-    const z = parseInt($('tileZoom').value) || 14;
-    const s = parseFloat($('seuilDeg').value) || 45;
-    triggerDL(ST.mbt, z, s);
-  } else {
-    log('Aucun fichier MBTiles disponible.', 'warn');
+  }catch(e){
+    if(e.message==='Annulé'){log('Annulé.','warn');setStatus('idle');await prog('Annulé',0);}
+    else{log('ERREUR : '+e.message,'err');setStatus('err');await prog('Erreur',0);}
+  }finally{
+    $('btnPente').disabled=false;
+    $('btnAbort').disabled=true;
+    ST.ac=null;
   }
 });
 
-// ── PIPELINE PRINCIPAL ─────────────────────────────────────────────
-async function run() {
-  if (!ST.bbox) { log('Aucune zone sélectionnée.', 'warn'); return; }
+// ═══════════════════════════════════════════════════════════════════
+//  ÉTAPE 3 : VISUALISEUR NIVEAUX DE GRIS + CURSEURS
+// ═══════════════════════════════════════════════════════════════════
 
-  ST.t0  = Date.now();
-  ST.ac  = new AbortController();
-  $('btnProcess').disabled = true;
-  $('btnAbort').disabled   = false;
-  dlEl.classList.remove('visible');
+function updateSliderLabels(){
+  $('lblSMin').textContent=parseFloat($('sMin').value).toFixed(1)+'°';
+  $('lblSMax').textContent=parseFloat($('sMax').value).toFixed(1)+'°';
+}
+$('sMin').addEventListener('input',()=>{
+  if(parseFloat($('sMin').value)>parseFloat($('sMax').value))
+    $('sMax').value=$('sMin').value;
+  updateSliderLabels();renderVisu();
+});
+$('sMax').addEventListener('input',()=>{
+  if(parseFloat($('sMax').value)<parseFloat($('sMin').value))
+    $('sMin').value=$('sMax').value;
+  updateSliderLabels();renderVisu();
+});
+
+function renderVisu(){
+  if(!ST.tileSlopes||ST.tileSlopes.size===0) return;
+  const sMin=parseFloat($('sMin').value);
+  const sMax=parseFloat($('sMax').value);
+
+  // Trouver l'emprise de toutes les tuiles pour composer l'image
+  let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity,z0=0;
+  for(const k of ST.tileSlopes.keys()){
+    const[z,x,y]=k.split('/').map(Number);
+    z0=z;x0=Math.min(x0,x);y0=Math.min(y0,y);x1=Math.max(x1,x);y1=Math.max(y1,y);
+  }
+  const cols=x1-x0+1,rows=y1-y0+1;
+  const W=cols*TILE_PX,H=rows*TILE_PX;
+
+  const canvas=$('visuCanvas');
+  canvas.width=W;canvas.height=H;
+  const ctx=canvas.getContext('2d');
+  ctx.fillStyle='#111';ctx.fillRect(0,0,W,H);
+
+  for(const[k,slope] of ST.tileSlopes){
+    const[z,x,y]=k.split('/').map(Number);
+    const tc=renderTilePNG(slope,sMin,sMax);
+    ctx.drawImage(tc,(x-x0)*TILE_PX,(y-y0)*TILE_PX);
+  }
+
+  // Superposer le polygone estran
+  if(ST.poly){
+    const nPM=1<<z0;
+    const lon2px=lon=>((lon+180)/360*nPM-x0)*TILE_PX;
+    const lat2px=lat=>((1-Math.log(Math.tan(lat*Math.PI/180)+1/Math.cos(lat*Math.PI/180))/Math.PI)/2*nPM-y0)*TILE_PX;
+    ctx.strokeStyle='#00c8a0';ctx.lineWidth=2;ctx.setLineDash([6,3]);
+    const drawRing=coords=>{
+      ctx.beginPath();
+      coords.forEach(([ln,lt],i)=>{
+        const px=lon2px(ln),py=lat2px(lt);
+        i===0?ctx.moveTo(px,py):ctx.lineTo(px,py);
+      });
+      ctx.stroke();
+    };
+    const geo=ST.poly.geometry;
+    if(geo.type==='Polygon') drawRing(geo.coordinates[0]);
+    else geo.coordinates.forEach(p=>drawRing(p[0]));
+    ctx.setLineDash([]);
+  }
+
+  $('visuWrap').style.display='block';
+}
+
+function hideVisu(){$('visuWrap').style.display='none';}
+
+// ═══════════════════════════════════════════════════════════════════
+//  ÉTAPE 4 : EXPORT MBTILES
+// ═══════════════════════════════════════════════════════════════════
+
+$('btnExport').addEventListener('click',async()=>{
+  if(!ST.tileSlopes||ST.tileSlopes.size===0){log('Aucune pente disponible.','warn');return;}
+  ST.t0=Date.now();
+  ST.ac=new AbortController();
+  $('btnExport').disabled=true;
+  $('btnAbort').disabled=false;
   setStatus('run');
 
-  const zoom     = parseInt($('tileZoom').value)  || 14;
-  const seuilDeg = parseFloat($('seuilDeg').value) || 45;
+  const sMin=parseFloat($('sMin').value);
+  const sMax=parseFloat($('sMax').value);
+  const zoom=parseInt($('tileZoom').value)||14;
+  log(`▶ Étape 4 — Export MBTiles sMin=${sMin.toFixed(1)}° sMax=${sMax.toFixed(1)}°`,'info');
 
-  log(`▶ niveau WGS84G=${zoom}  seuil blanc=${seuilDeg}°`, 'info');
+  try{
+    await prog('Chargement sql.js…',2);
+    log('sql.js : chargement SQLite WASM…','info');
+    const SQL=await initSqlJs({
+      locateFile:f=>`https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.2/${f}`
+    });
+    const db=new SQL.Database();
+    db.run('CREATE TABLE metadata(name TEXT,value TEXT)');
+    db.run('CREATE TABLE tiles(zoom_level INTEGER,tile_column INTEGER,tile_row INTEGER,tile_data BLOB,PRIMARY KEY(zoom_level,tile_column,tile_row))');
+    db.run('CREATE UNIQUE INDEX tidx ON tiles(zoom_level,tile_column,tile_row)');
+    for(const[k,v]of[
+      ['name','LIDAR Pente — Estran'],['type','baselayer'],['version','1'],
+      ['description',`Pente LIDAR IGN — estran — seuils [${sMin.toFixed(1)}°, ${sMax.toFixed(1)}°]`],
+      ['format','png'],['minzoom',String(zoom)],['maxzoom',String(zoom)],
+    ]) db.run('INSERT INTO metadata VALUES(?,?)',[k,v]);
 
-  try {
-    await prog('Calcul de la grille de tuiles WGS84G…', 5);
-    const tiles = bboxToTileList(ST.bbox, zoom);
-    if (!tiles.length) throw new Error('Aucune tuile dans la zone.');
+    const ins=db.prepare('INSERT OR REPLACE INTO tiles VALUES(?,?,?,?)');
+    const total=ST.tileSlopes.size;
+    let done=0,inserted=0,errs=0;
 
-    if (tiles.length > 500)
-      log(`⚠ ${tiles.length} tuiles — zone large ou niveau élevé. Peut être très long.`, 'warn');
-
-    log(`Grille WGS84G : ${tiles.length} tuile(s) — niveau ${zoom} — ~${tileResolutionWGS84(tiles[0].row, zoom).toFixed(1)} m/px`, 'ok');
-
-    await prog('Démarrage assemblage MBTiles…', 8);
-    const mbt = await buildMBT(tiles, zoom, seuilDeg);
-    ST.mbt = mbt;
-
-    const sz = mbt.byteLength > 1048576
-      ? `${(mbt.byteLength / 1048576).toFixed(2)} Mo`
-      : `${(mbt.byteLength / 1024).toFixed(0)} Ko`;
-
-    log(`MBTiles pente : ${sz}  (${tiles.length} tuile(s))`, 'ok');
-
-    await prog('Téléchargement…', 99);
-    triggerDL(mbt, zoom, seuilDeg);
-    await prog('✓ Terminé', 100);
-    setStatus('done');
-    $('mbtSize').textContent = sz;
-    $('mbtName').textContent = `lidar_pente_z${zoom}_s${seuilDeg}.mbtiles`;
-    dlEl.classList.add('visible');
-    log("✓ Terminé. Cliquez sur le bouton si le téléchargement n'a pas démarré.", 'ok');
-
-  } catch (e) {
-    if (e.name === 'AbortError' || e.message === 'Annulé') {
-      log('Annulé.', 'warn'); setStatus('idle'); await prog('Annulé', 0);
-    } else {
-      log('ERREUR : ' + e.message, 'err');
-      console.error('[LIDAR_PENTE]', e);
-      setStatus('err'); await prog('Erreur', 0);
+    for(const[k,slope] of ST.tileSlopes){
+      if(ST.ac.signal.aborted) throw new Error('Annulé');
+      const[z,x,y]=k.split('/').map(Number);
+      const tmsY=(1<<z)-1-y;
+      try{
+        const tc=renderTilePNG(slope,sMin,sMax);
+        const png=await canvasToPNG(tc);
+        ins.run([z,x,tmsY,Array.from(png)]);
+        inserted++;
+      }catch(e){errs++;log(`✗ SQL ${k}: ${e.message}`,'err');}
+      done++;
+      await prog(`Export ${done}/${total}`,5+90*(done/total));
     }
-  } finally {
-    $('btnProcess').disabled = false;
-    $('btnAbort').disabled   = true;
-    ST.ac = null;
-  }
-}
 
-$('btnProcess').addEventListener('click', run);
-$('btnAbort').addEventListener('click', () => {
-  if (ST.ac) { ST.ac.abort(); log('Annulation…', 'warn'); }
+    ins.free();
+    if(inserted===0){db.close();throw new Error('Aucune tuile insérée.');}
+    log(`SQLite : ${inserted}/${total} tuiles — export…`,'ok');
+    await prog('Export SQLite…',97);
+    const raw=db.export();const data=raw.slice();db.close();
+
+    ST.mbt=data;
+    const sz=data.byteLength>1048576
+      ?`${(data.byteLength/1048576).toFixed(2)} Mo`
+      :`${(data.byteLength/1024).toFixed(0)} Ko`;
+    log(`MBTiles : ${sz}`,'ok');
+
+    // Téléchargement
+    const fname=`lidar_pente_z${zoom}_s${sMin.toFixed(0)}-${sMax.toFixed(0)}.mbtiles`;
+    const blob=new Blob([data],{type:'application/x-sqlite3'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;a.download=fname;
+    document.body.appendChild(a);a.click();document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url),30000);
+
+    await prog('✓ Terminé',100);setStatus('done');
+    $('mbtSize').textContent=sz;$('mbtName').textContent=fname;
+    dlEl.classList.add('visible');
+    log(`⬇ ${fname} — ${sz}`,'ok');
+    log("✓ Terminé. Cliquez sur le bouton si le téléchargement n'a pas démarré.",'ok');
+
+  }catch(e){
+    if(e.message==='Annulé'){log('Annulé.','warn');setStatus('idle');await prog('Annulé',0);}
+    else{log('ERREUR : '+e.message,'err');setStatus('err');await prog('Erreur',0);}
+  }finally{
+    $('btnExport').disabled=false;
+    $('btnAbort').disabled=true;
+    ST.ac=null;
+  }
 });
 
-log('LIDAR_PENTE v1.2 prêt. Dessinez un rectangle sur la carte.', 'ok');
+$('btnDownload').addEventListener('click',()=>{
+  if(!ST.mbt){log('Aucun MBTiles disponible.','warn');return;}
+  const zoom=parseInt($('tileZoom').value)||14;
+  const sMin=parseFloat($('sMin').value);
+  const sMax=parseFloat($('sMax').value);
+  const blob=new Blob([ST.mbt],{type:'application/x-sqlite3'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download=`lidar_pente_z${zoom}_s${sMin.toFixed(0)}-${sMax.toFixed(0)}.mbtiles`;
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url),30000);
+});
+
+$('btnAbort').addEventListener('click',()=>{if(ST.ac){ST.ac.abort();log('Annulation…','warn');}});
+
+log('LIDAR_PENTE v3.0 prêt. Dessinez un rectangle sur la carte.','ok');
