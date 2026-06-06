@@ -344,7 +344,7 @@ $('btnEstran').addEventListener('click',async()=>{
   setStatus('run');
   resetState();
 
-  const bmve=parseFloat($('bmveAlt').value)||=-3;
+  const bmve=parseFloat($('bmveAlt').value)||-3;
   const pmve=parseFloat($('pmveAlt').value)||5;
   const res =parseInt($('mntRes').value)||5;
   log(`▶ Étape 1 — BMVE=${bmve}m  PMVE=${pmve}m  résol=${res}m`,'info');
