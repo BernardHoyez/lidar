@@ -74,8 +74,10 @@ function setStatus(s){
 
 // ── CARTE LEAFLET ──────────────────────────────────────────────────
 const map=L.map('map',{center:[50.5,1.6],zoom:11});
+// Forcer Leaflet à recalculer la taille après que le DOM flex soit résolu
+setTimeout(()=>map.invalidateSize(),100);
 L.tileLayer(
-  IGN_WMTS+'?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0'+
+  'https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0'+
   '&LAYER=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2&STYLE=normal&FORMAT=image/png'+
   '&TILEMATRIXSET=PM&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}',
   {attribution:'© IGN',maxZoom:19}
