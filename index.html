@@ -300,8 +300,10 @@
         <input type="range" id="sMax" min="0" max="90" value="45" step="0.1"/>
         <span class="slider-val" id="lblSMax">45.0°</span>
       </div>
-      <canvas id="visuCanvas"></canvas>
-      <button class="btn btn-warn" id="btnExport" style="margin-top:8px">
+      <button class="btn btn-secondary" onclick="document.getElementById('visuOverlay').style.display='flex'" style="margin-bottom:6px">
+        🔍 Ouvrir le visualiseur plein écran
+      </button>
+      <button class="btn btn-warn" id="btnExport">
         ⬇ Exporter MBTiles
       </button>
     </div>
@@ -334,6 +336,27 @@
     </div>
 
   </aside>
+</div>
+
+<!-- OVERLAY VISUALISEUR PLEIN ÉCRAN -->
+<div id="visuOverlay" style="display:none;position:fixed;inset:0;z-index:2000;
+  background:rgba(6,17,31,0.97);flex-direction:column;align-items:center;
+  justify-content:center;gap:12px;">
+  <div style="display:flex;align-items:center;gap:16px;flex-shrink:0;">
+    <span style="font-size:12px;letter-spacing:.1em;color:#5a8090;text-transform:uppercase;">
+      Pente estran · niveaux de gris
+    </span>
+    <button onclick="document.getElementById('visuOverlay').style.display='none'"
+      style="background:transparent;border:1px solid #1a3352;color:#c8dff0;
+      padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;">✕ Fermer</button>
+  </div>
+  <canvas id="visuCanvas" style="max-width:95vw;max-height:80vh;
+    image-rendering:pixelated;border:1px solid #1a3352;display:block;"></canvas>
+  <div style="display:flex;gap:24px;flex-shrink:0;">
+    <span style="font-size:10px;color:#5a8090;">■ Noir = seuil min</span>
+    <span style="font-size:10px;color:#5a8090;">□ Blanc = seuil max</span>
+    <span id="visuInfo" style="font-size:10px;color:#00c8a0;font-family:monospace;"></span>
+  </div>
 </div>
 
 <!-- Bannière mise à jour SW -->

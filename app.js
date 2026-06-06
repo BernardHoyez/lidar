@@ -340,7 +340,10 @@ function tileResWGS84(row,L){
   return 180/nR/TILE_PX*111320; // m/px
 }
 
-// Convertit tuile XYZ PM → tuile WGS84G au même niveau
+// Convertit tuile XYZ PM → tuile WGS84G
+// WGS84G niveau L : nCols=2^(L+1), nRows=2^L
+// Pour avoir la même résolution angulaire qu'un zoom PM z,
+// on prend L = z-1 (car WGS84G L=z-1 a 2^z colonnes comme PM z)
 function pm2wgs84(x,y,z,L){
   const n=1<<z;
   const lon=(x+0.5)/n*360-180;
@@ -487,9 +490,10 @@ $('btnEstran').addEventListener('click',async()=>{
       if(ST.ac.signal.aborted) throw new Error('Annulé');
       const batch=tilesXYZ.slice(i,i+CONCUR);
       const results=await Promise.allSettled(batch.map(async({z,x,y})=>{
-        const{col,row}=pm2wgs84(x,y,z,z);
-        const elev=await fetchBILcached(col,row,z);
-        const cellM=tileResWGS84(row,z);
+        const wgsL=Math.max(0,z-1); // WGS84G L=z-1 ≈ même résolution que PM z
+        const{col,row}=pm2wgs84(x,y,z,wgsL);
+        const elev=await fetchBILcached(col,row,wgsL);
+        const cellM=tileResWGS84(row,wgsL);
         const slope=hornSlope(elev,TILE_PX,TILE_PX,cellM);
         return{z,x,y,slope};
       }));
@@ -561,47 +565,80 @@ function renderVisu(){
   const sMin=parseFloat($('sMin').value);
   const sMax=parseFloat($('sMax').value);
 
-  // Trouver l'emprise de toutes les tuiles pour composer l'image
-  let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity,z0=0;
+  // Emprise des tuiles PM
+  let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity,z0=14;
   for(const k of ST.tileSlopes.keys()){
     const[z,x,y]=k.split('/').map(Number);
-    z0=z;x0=Math.min(x0,x);y0=Math.min(y0,y);x1=Math.max(x1,x);y1=Math.max(y1,y);
+    z0=z; x0=Math.min(x0,x); y0=Math.min(y0,y); x1=Math.max(x1,x); y1=Math.max(y1,y);
   }
-  const cols=x1-x0+1,rows=y1-y0+1;
-  const W=cols*TILE_PX,H=rows*TILE_PX;
+  const cols=x1-x0+1, rows=y1-y0+1;
+  const W=cols*TILE_PX, H=rows*TILE_PX;
 
+  // Canvas interne pleine résolution
   const canvas=$('visuCanvas');
-  canvas.width=W;canvas.height=H;
+  canvas.width=W; canvas.height=H;
   const ctx=canvas.getContext('2d');
-  ctx.fillStyle='#111';ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#111'; ctx.fillRect(0,0,W,H);
 
+  // Convertisseur lon/lat → pixel dans ce canvas
+  const nPM=1<<z0;
+  const lon2px=lon=>((lon+180)/360*nPM - x0)*TILE_PX;
+  const lat2px=lat=>((1-Math.log(Math.tan(lat*Math.PI/180)+1/Math.cos(lat*Math.PI/180))/Math.PI)/2*nPM - y0)*TILE_PX;
+
+  // Dessiner les tuiles pente
   for(const[k,slope] of ST.tileSlopes){
     const[z,x,y]=k.split('/').map(Number);
     const tc=renderTilePNG(slope,sMin,sMax);
     ctx.drawImage(tc,(x-x0)*TILE_PX,(y-y0)*TILE_PX);
   }
 
-  // Superposer le polygone estran
+  // Masquer les pixels hors polygone estran (remplir l'extérieur en noir)
   if(ST.poly){
-    const nPM=1<<z0;
-    const lon2px=lon=>((lon+180)/360*nPM-x0)*TILE_PX;
-    const lat2px=lat=>((1-Math.log(Math.tan(lat*Math.PI/180)+1/Math.cos(lat*Math.PI/180))/Math.PI)/2*nPM-y0)*TILE_PX;
-    ctx.strokeStyle='#00c8a0';ctx.lineWidth=2;ctx.setLineDash([6,3]);
-    const drawRing=coords=>{
-      ctx.beginPath();
-      coords.forEach(([ln,lt],i)=>{
-        const px=lon2px(ln),py=lat2px(lt);
-        i===0?ctx.moveTo(px,py):ctx.lineTo(px,py);
-      });
-      ctx.stroke();
+    ctx.save();
+    // Créer un path du polygone estran
+    const addRing=coords=>{
+      ctx.moveTo(lon2px(coords[0][0]),lat2px(coords[0][1]));
+      for(let i=1;i<coords.length;i++) ctx.lineTo(lon2px(coords[i][0]),lat2px(coords[i][1]));
+      ctx.closePath();
     };
+    // Remplir tout le canvas en noir, puis "découper" l'estran en transparent
+    ctx.globalCompositeOperation='destination-in';
+    ctx.beginPath();
     const geo=ST.poly.geometry;
-    if(geo.type==='Polygon') drawRing(geo.coordinates[0]);
-    else geo.coordinates.forEach(p=>drawRing(p[0]));
-    ctx.setLineDash([]);
+    if(geo.type==='Polygon') addRing(geo.coordinates[0]);
+    else geo.coordinates.forEach(p=>addRing(p[0]));
+    ctx.fillStyle='rgba(0,0,0,1)';
+    ctx.fill('evenodd');
+    ctx.restore();
+
+    // Fond noir sous le canvas (les zones transparentes apparaîtront noires)
+    // → on va recréer l'image avec fond noir + dessin masqué
+    const final=document.createElement('canvas');
+    final.width=W; final.height=H;
+    const fctx=final.getContext('2d');
+    fctx.fillStyle='#111'; fctx.fillRect(0,0,W,H);
+    fctx.drawImage(canvas,0,0);
+
+    // Contour estran
+    fctx.strokeStyle='#00c8a0'; fctx.lineWidth=2; fctx.setLineDash([6,3]);
+    fctx.beginPath();
+    if(geo.type==='Polygon') addRingCtx(fctx,geo.coordinates[0],lon2px,lat2px);
+    else geo.coordinates.forEach(p=>addRingCtx(fctx,p[0],lon2px,lat2px));
+    fctx.stroke(); fctx.setLineDash([]);
+
+    canvas.width=W; canvas.height=H;
+    canvas.getContext('2d').drawImage(final,0,0);
   }
 
+  // Afficher l'overlay plein écran
   $('visuSection').style.display='block';
+  $('visuOverlay').style.display='flex';
+}
+
+function addRingCtx(ctx,coords,lon2px,lat2px){
+  ctx.moveTo(lon2px(coords[0][0]),lat2px(coords[0][1]));
+  for(let i=1;i<coords.length;i++) ctx.lineTo(lon2px(coords[i][0]),lat2px(coords[i][1]));
+  ctx.closePath();
 }
 
 
