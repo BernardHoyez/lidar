@@ -288,20 +288,10 @@
     <div class="panel-section" id="visuSection">
       <div class="section-title" id="step4title">
         <span class="step-badge">4</span>
-        Visualiseur · réglage contraste
-      </div>
-      <div class="slider-row">
-        <label>Seuil<br>min</label>
-        <input type="range" id="sMin" min="0" max="90" value="0" step="0.1"/>
-        <span class="slider-val" id="lblSMin">0.0°</span>
-      </div>
-      <div class="slider-row">
-        <label>Seuil<br>max</label>
-        <input type="range" id="sMax" min="0" max="90" value="45" step="0.1"/>
-        <span class="slider-val" id="lblSMax">45.0°</span>
+        Visualiseur &amp; Export
       </div>
       <button class="btn btn-secondary" onclick="document.getElementById('visuOverlay').style.display='flex'" style="margin-bottom:6px">
-        🔍 Ouvrir le visualiseur plein écran
+        🔍 Ouvrir le visualiseur
       </button>
       <button class="btn btn-warn" id="btnExport">
         ⬇ Exporter MBTiles
@@ -340,22 +330,55 @@
 
 <!-- OVERLAY VISUALISEUR PLEIN ÉCRAN -->
 <div id="visuOverlay" style="display:none;position:fixed;inset:0;z-index:2000;
-  background:rgba(6,17,31,0.97);flex-direction:column;align-items:center;
-  justify-content:center;gap:12px;">
-  <div style="display:flex;align-items:center;gap:16px;flex-shrink:0;">
-    <span style="font-size:12px;letter-spacing:.1em;color:#5a8090;text-transform:uppercase;">
+  background:rgba(6,17,31,0.97);flex-direction:column;">
+
+  <!-- Barre de contrôle en haut -->
+  <div style="display:flex;align-items:center;gap:14px;padding:10px 16px;
+    border-bottom:1px solid #1a3352;flex-shrink:0;flex-wrap:wrap;">
+    <span style="font-size:12px;letter-spacing:.1em;color:#5a8090;text-transform:uppercase;white-space:nowrap;">
       Pente estran · niveaux de gris
     </span>
+
+    <!-- Seuil min -->
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span style="font-size:10px;color:#5a8090;white-space:nowrap;">Seuil min</span>
+      <input type="range" id="sMin" min="0" max="90" value="0" step="0.1"
+        style="-webkit-appearance:none;width:120px;height:3px;background:#1a3352;
+        border-radius:2px;outline:none;cursor:pointer;"/>
+      <span id="lblSMin" style="font-size:11px;color:#00c8a0;font-family:monospace;width:38px;">0.0°</span>
+    </div>
+
+    <!-- Seuil max -->
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span style="font-size:10px;color:#5a8090;white-space:nowrap;">Seuil max</span>
+      <input type="range" id="sMax" min="0" max="90" value="45" step="0.1"
+        style="-webkit-appearance:none;width:120px;height:3px;background:#1a3352;
+        border-radius:2px;outline:none;cursor:pointer;"/>
+      <span id="lblSMax" style="font-size:11px;color:#00c8a0;font-family:monospace;width:38px;">45.0°</span>
+    </div>
+
+    <span id="visuInfo" style="font-size:10px;color:#5a8090;font-family:monospace;margin-left:auto;"></span>
+
+    <button id="btnVisuReset" title="Réinitialiser zoom"
+      style="background:transparent;border:1px solid #1a3352;color:#c8dff0;
+      padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;">⊡ 1:1</button>
     <button onclick="document.getElementById('visuOverlay').style.display='none'"
       style="background:transparent;border:1px solid #1a3352;color:#c8dff0;
-      padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;">✕ Fermer</button>
+      padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;">✕ Fermer</button>
   </div>
-  <canvas id="visuCanvas" style="max-width:95vw;max-height:80vh;
-    image-rendering:pixelated;border:1px solid #1a3352;display:block;"></canvas>
-  <div style="display:flex;gap:24px;flex-shrink:0;">
-    <span style="font-size:10px;color:#5a8090;">■ Noir = seuil min</span>
-    <span style="font-size:10px;color:#5a8090;">□ Blanc = seuil max</span>
-    <span id="visuInfo" style="font-size:10px;color:#00c8a0;font-family:monospace;"></span>
+
+  <!-- Zone canvas zoomable -->
+  <div id="visuViewport" style="flex:1;overflow:hidden;position:relative;cursor:grab;">
+    <canvas id="visuCanvas" style="position:absolute;top:0;left:0;
+      image-rendering:pixelated;transform-origin:0 0;"></canvas>
+  </div>
+
+  <!-- Barre de statut bas -->
+  <div style="padding:6px 16px;border-top:1px solid #1a3352;flex-shrink:0;
+    display:flex;gap:20px;font-size:10px;color:#5a8090;">
+    <span>■ Noir = seuil min &nbsp;·&nbsp; □ Blanc = seuil max</span>
+    <span>Molette : zoom &nbsp;·&nbsp; Glisser : déplacer</span>
+    <span id="visuZoomLbl" style="margin-left:auto;">zoom 100%</span>
   </div>
 </div>
 

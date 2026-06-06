@@ -630,9 +630,10 @@ function renderVisu(){
     canvas.getContext('2d').drawImage(final,0,0);
   }
 
-  // Afficher l'overlay plein écran
+  // Afficher l'overlay et réinitialiser le zoom
   $('visuSection').style.display='block';
   $('visuOverlay').style.display='flex';
+  setTimeout(()=>window.visuResetZoom&&window.visuResetZoom(),50);
 }
 
 function addRingCtx(ctx,coords,lon2px,lat2px){
@@ -642,9 +643,87 @@ function addRingCtx(ctx,coords,lon2px,lat2px){
 }
 
 
-// ═══════════════════════════════════════════════════════════════════
-//  ÉTAPE 4 : EXPORT MBTILES
-// ═══════════════════════════════════════════════════════════════════
+// ── ZOOM / PAN du visualiseur ─────────────────────────────────────
+(()=>{
+  let scale=1, panX=0, panY=0;
+  let panning=false, px0=0, py0=0, ox0=0, oy0=0;
+
+  function applyTransform(){
+    $('visuCanvas').style.transform=`translate(${panX}px,${panY}px) scale(${scale})`;
+    $('visuZoomLbl').textContent=`zoom ${Math.round(scale*100)}%`;
+  }
+
+  function resetZoom(){
+    const vp=$('visuViewport');
+    const cv=$('visuCanvas');
+    if(!cv.width||!cv.height){scale=1;panX=panY=0;applyTransform();return;}
+    const scaleX=vp.clientWidth/cv.width;
+    const scaleY=vp.clientHeight/cv.height;
+    scale=Math.min(scaleX,scaleY,1); // jamais > 100% au départ
+    panX=(vp.clientWidth -cv.width *scale)/2;
+    panY=(vp.clientHeight-cv.height*scale)/2;
+    applyTransform();
+  }
+  window.visuResetZoom=resetZoom; // appelé après renderVisu
+
+  $('btnVisuReset').addEventListener('click',resetZoom);
+
+  // Molette → zoom centré sur le curseur
+  $('visuViewport').addEventListener('wheel',e=>{
+    e.preventDefault();
+    const rect=$('visuViewport').getBoundingClientRect();
+    const mx=e.clientX-rect.left, my=e.clientY-rect.top;
+    const factor=e.deltaY<0?1.2:1/1.2;
+    const newScale=Math.max(0.1,Math.min(20,scale*factor));
+    panX=mx-(mx-panX)*(newScale/scale);
+    panY=my-(my-panY)*(newScale/scale);
+    scale=newScale;
+    applyTransform();
+  },{passive:false});
+
+  // Glisser
+  $('visuViewport').addEventListener('mousedown',e=>{
+    panning=true; px0=e.clientX; py0=e.clientY; ox0=panX; oy0=panY;
+    $('visuViewport').style.cursor='grabbing';
+  });
+  window.addEventListener('mousemove',e=>{
+    if(!panning) return;
+    panX=ox0+(e.clientX-px0); panY=oy0+(e.clientY-py0);
+    applyTransform();
+  });
+  window.addEventListener('mouseup',()=>{
+    panning=false; $('visuViewport').style.cursor='grab';
+  });
+
+  // Touch pinch + pan
+  let touches0=null, scale0=1, panX0=0, panY0=0;
+  $('visuViewport').addEventListener('touchstart',e=>{
+    if(e.touches.length===1){
+      panning=true; px0=e.touches[0].clientX; py0=e.touches[0].clientY; ox0=panX; oy0=panY;
+    } else if(e.touches.length===2){
+      panning=false;
+      touches0=[[e.touches[0].clientX,e.touches[0].clientY],[e.touches[1].clientX,e.touches[1].clientY]];
+      scale0=scale; panX0=panX; panY0=panY;
+    }
+  },{passive:true});
+  $('visuViewport').addEventListener('touchmove',e=>{
+    e.preventDefault();
+    if(e.touches.length===1&&panning){
+      panX=ox0+(e.touches[0].clientX-px0); panY=oy0+(e.touches[0].clientY-py0);
+      applyTransform();
+    } else if(e.touches.length===2&&touches0){
+      const d0=Math.hypot(touches0[1][0]-touches0[0][0],touches0[1][1]-touches0[0][1]);
+      const d1=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);
+      scale=Math.max(0.1,Math.min(20,scale0*d1/d0));
+      const rect=$('visuViewport').getBoundingClientRect();
+      const cx=(e.touches[0].clientX+e.touches[1].clientX)/2-rect.left;
+      const cy=(e.touches[0].clientY+e.touches[1].clientY)/2-rect.top;
+      panX=cx-(cx-panX0)*(scale/scale0); panY=cy-(cy-panY0)*(scale/scale0);
+      applyTransform();
+    }
+  },{passive:false});
+  $('visuViewport').addEventListener('touchend',()=>{touches0=null;panning=false;});
+})();
 
 $('btnExport').addEventListener('click',async()=>{
   if(!ST.tileSlopes||ST.tileSlopes.size===0){log('Aucune pente disponible.','warn');return;}
