@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   LIDAR_PENTE v3.1.0
+   LIDAR_PENTE v3.2.0
    Détection d'irrégularités topographiques sur l'estran
    ───────────────────────────────────────────────────────────────
    Étape 1 : Rectangle → MNT RGE Alti → masque estran [BMVE, PMVE]

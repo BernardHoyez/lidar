@@ -1,5 +1,5 @@
-/* LIDAR_PENTE sw v3.1.0 — brise-caches */
-const CACHE='lidar-pente-v3.1.0';
+/* LIDAR_PENTE sw v3.2.0 — brise-caches */
+const CACHE='lidar-pente-v3.2.0';
 const PRE=['./', './index.html','./app.js','./manifest.json','./icon192.png','./icon512.png'];
 self.addEventListener('install',e=>{
   e.waitUntil(caches.open(CACHE).then(c=>c.addAll(PRE)).then(()=>self.skipWaiting()));
