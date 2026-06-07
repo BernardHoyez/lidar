@@ -14,18 +14,21 @@
 'use strict';
 
 // ── CONSTANTES ─────────────────────────────────────────────────────
-const IGN_ALTI  = 'https://data.geopf.fr/altimetrie/1.0/calcul/alti/rest/elevation.json';
-const IGN_WMTS  = 'https://data.geopf.fr/wmts';
-const ALTI_RES  = 'ign_rge_alti_wld';
-const MNT_LAYER = 'ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES';
-const MNT_FMT   = 'image/x-bil;bits=32';
-const MNT_TMS   = 'WGS84G';
-const TILE_PX   = 256;
-const BATCH     = 40;
-const DELAY_MS  = 230;
-const CONCUR    = 3;
-const MIN_AREA  = 1000;   // m² min pour garder un polygone
-const SIMP_TOL  = 0.00004;
+const IGN_ALTI    = 'https://data.geopf.fr/altimetrie/1.0/calcul/alti/rest/elevation.json';
+const IGN_WMTS    = 'https://data.geopf.fr/wmts';
+const ALTI_RES    = 'ign_rge_alti_wld';
+const MNT_LAYER   = 'ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES';
+const MNT_FMT     = 'image/x-bil;bits=32';
+const MNT_TMS     = 'WGS84G';
+const WGS84G_LMIN = 6;   // niveaux disponibles pour HIGHRES (GetCapabilities)
+const WGS84G_LMAX = 14;  // au-delà → HTTP 404
+const BIL_NODATA  = -99999; // noDataValue IGN officiel
+const TILE_PX     = 256;
+const BATCH       = 40;
+const DELAY_MS    = 230;
+const CONCUR      = 3;
+const MIN_AREA    = 1000;
+const SIMP_TOL    = 0.00004;
 
 // ── STATE ──────────────────────────────────────────────────────────
 const ST = {
@@ -183,7 +186,7 @@ async function getMNT(bbox,res){
       const d=await (await apiFetch(url)).json();
       (d.elevations||[]).forEach((e,j)=>{
         const z=e.z;
-        grid[i+j]=(z==null||z<=-1000)?NaN:Number(z);
+        grid[i+j] = (z == null || z < -500) ? NaN : Number(z);
       });
     }catch(e){
       if(e.message==='Annulé') throw e;
@@ -340,15 +343,13 @@ function tileResWGS84(row,L){
   return 180/nR/TILE_PX*111320; // m/px
 }
 
-// Convertit tuile XYZ PM → tuile WGS84G
-// WGS84G niveau L : nCols=2^(L+1), nRows=2^L
-// Pour avoir la même résolution angulaire qu'un zoom PM z,
-// on prend L = z-1 (car WGS84G L=z-1 a 2^z colonnes comme PM z)
-function pm2wgs84(x,y,z,L){
-  const n=1<<z;
-  const lon=(x+0.5)/n*360-180;
-  const lat=Math.atan(Math.sinh(Math.PI*(1-2*(y+0.5)/n)))*180/Math.PI;
-  return ll2wgs84(lon,lat,L);
+// Convertit tuile XYZ PM → tuile WGS84G au niveau L clampé dans [6,14]
+function pm2wgs84(x, y, z, L) {
+  const wgsL = Math.max(WGS84G_LMIN, Math.min(WGS84G_LMAX, L));
+  const n = 1 << z;
+  const lon = (x + 0.5) / n * 360 - 180;
+  const lat = Math.atan(Math.sinh(Math.PI * (1 - 2*(y+0.5)/n))) * 180 / Math.PI;
+  return { ...ll2wgs84(lon, lat, wgsL), wgsL };
 }
 
 // Fetch BIL float32
@@ -382,20 +383,19 @@ async function fetchBILcached(col,row,L){
 }
 
 // Algorithme de Horn — pente en degrés
-function hornSlope(elev,w,h,cellM){
-  const NODATA=-9000; // BIL IGN : nodata ≈ -99999
-  const slope=new Float32Array(w*h).fill(NaN);
-  for(let r=1;r<h-1;r++){
-    for(let c=1;c<w-1;c++){
-      const i=r*w+c;
-      if(elev[i]<NODATA) continue;
-      const fix=v=>(v<NODATA?elev[i]:v);
-      const a=fix(elev[(r-1)*w+(c-1)]),b=fix(elev[(r-1)*w+c]),cc=fix(elev[(r-1)*w+(c+1)]);
-      const d=fix(elev[r*w+(c-1)]),                             f=fix(elev[r*w+(c+1)]);
-      const g=fix(elev[(r+1)*w+(c-1)]),hh=fix(elev[(r+1)*w+c]),ii=fix(elev[(r+1)*w+(c+1)]);
-      const dzdx=((cc+2*f+ii)-(a+2*d+g))/(8*cellM);
-      const dzdy=((g+2*hh+ii)-(a+2*b+cc))/(8*cellM);
-      slope[i]=Math.atan(Math.sqrt(dzdx*dzdx+dzdy*dzdy))*180/Math.PI;
+function hornSlope(elev, w, h, cellM) {
+  const slope = new Float32Array(w*h).fill(NaN);
+  for (let r = 1; r < h-1; r++) {
+    for (let c = 1; c < w-1; c++) {
+      const i = r*w+c;
+      if (elev[i] <= BIL_NODATA/2) continue;  // nodata IGN ≈ -99999
+      const fix = v => (v <= BIL_NODATA/2 ? elev[i] : v);
+      const a=fix(elev[(r-1)*w+(c-1)]), b=fix(elev[(r-1)*w+c]), cc=fix(elev[(r-1)*w+(c+1)]);
+      const d=fix(elev[r*w+(c-1)]),                               f=fix(elev[r*w+(c+1)]);
+      const g=fix(elev[(r+1)*w+(c-1)]), hh=fix(elev[(r+1)*w+c]), ii=fix(elev[(r+1)*w+(c+1)]);
+      const dzdx = ((cc + 2*f + ii) - (a + 2*d + g)) / (8*cellM);
+      const dzdy = ((g + 2*hh + ii) - (a + 2*b + cc)) / (8*cellM);
+      slope[i] = Math.atan(Math.sqrt(dzdx*dzdx + dzdy*dzdy)) * 180 / Math.PI;
     }
   }
   return slope;
@@ -489,13 +489,13 @@ $('btnEstran').addEventListener('click',async()=>{
     for(let i=0;i<total;i+=CONCUR){
       if(ST.ac.signal.aborted) throw new Error('Annulé');
       const batch=tilesXYZ.slice(i,i+CONCUR);
-      const results=await Promise.allSettled(batch.map(async({z,x,y})=>{
-        const wgsL=Math.max(0,z-1); // WGS84G L=z-1 ≈ même résolution que PM z
-        const{col,row}=pm2wgs84(x,y,z,wgsL);
-        const elev=await fetchBILcached(col,row,wgsL);
-        const cellM=tileResWGS84(row,wgsL);
-        const slope=hornSlope(elev,TILE_PX,TILE_PX,cellM);
-        return{z,x,y,slope};
+      const results = await Promise.allSettled(batch.map(async ({z, x, y}) => {
+        const wgsL = Math.max(WGS84G_LMIN, Math.min(WGS84G_LMAX, z-1));
+        const {col, row} = pm2wgs84(x, y, z, wgsL);
+        const elev = await fetchBILcached(col, row, wgsL);
+        const cellM = tileResWGS84(row, wgsL);
+        const slope = hornSlope(elev, TILE_PX, TILE_PX, cellM);
+        return {z, x, y, slope};
       }));
       for(let j=0;j<batch.length;j++){
         done++;
