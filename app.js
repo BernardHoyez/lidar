@@ -157,8 +157,11 @@ async function apiFetch(url){
 // On télécharge toutes les tuiles WGS84G couvrant la bbox au niveau L,
 // on les assemble en une grille d'altitudes dense, puis on applique le masque.
 async function getMNT(bbox, mntZoom) {
-  // Niveau WGS84G : utiliser le niveau demandé, clampé dans [6,14]
-  const L = Math.max(WGS84G_LMIN, Math.min(WGS84G_LMAX, mntZoom));
+  // Pour le masque estran, on n'a pas besoin de la pleine résolution LIDAR.
+  // On utilise un niveau plus bas pour avoir ~30-50 m/px → grille légère et rapide.
+  // Niveau 11 → ~75 m/px (~4-8 tuiles sur une zone côtière typique)
+  const MNT_LEVEL = Math.max(WGS84G_LMIN, Math.min(11, mntZoom));
+  const L = MNT_LEVEL;
 
   // Tuiles WGS84G couvrant la bbox
   const nC = wgs84Cols(L), nR = wgs84Rows(L);
@@ -170,13 +173,9 @@ async function getMNT(bbox, mntZoom) {
   const tilesCols = col1 - col0 + 1;
   const tilesRows = row1 - row0 + 1;
   const nTiles = tilesCols * tilesRows;
-
-  // Grille résultante : assemblage de TILE_PX×TILE_PX par tuile
   const gCols = tilesCols * TILE_PX;
   const gRows = tilesRows * TILE_PX;
-  const grid  = new Float32Array(gCols * gRows).fill(NaN);
 
-  // BBox réelle couverte par l'assemblage (pas exactement == bbox demandée)
   const tl = wgs84TileBBox(col0, row0, L);
   const br = wgs84TileBBox(col1, row1, L);
   const gridBBox = {
@@ -184,10 +183,11 @@ async function getMNT(bbox, mntZoom) {
     minLat: br.minLat, maxLat: tl.maxLat
   };
 
-  const resM = tileResWGS84(row0, L).toFixed(1);
-  log(`Grille MNT BIL : ${tilesCols}×${tilesRows} tuiles WGS84G L=${L} → ${gCols}×${gRows} px (~${resM} m/px)`, 'info');
+  const resM = tileResWGS84(row0, L).toFixed(0);
+  log(`MNT masque : L=${L} — ${tilesCols}×${tilesRows} tuiles → grille ${gCols}×${gRows} px (~${resM} m/px)`, 'info');
   await prog(`MNT 0/${nTiles} tuiles`, 3);
 
+  const grid = new Float32Array(gCols * gRows).fill(NaN);
   let done = 0, errs = 0;
   const tileList = [];
   for (let tc = col0; tc <= col1; tc++)
@@ -202,18 +202,16 @@ async function getMNT(bbox, mntZoom) {
       const {tc, tr} = batch[j];
       if (results[j].status === 'fulfilled') {
         const bil = results[j].value;
-        // Copier les TILE_PX×TILE_PX valeurs dans la grille assemblée
         const offX = (tc - col0) * TILE_PX;
         const offY = (tr - row0) * TILE_PX;
-        for (let py = 0; py < TILE_PX; py++) {
+        for (let py = 0; py < TILE_PX; py++)
           for (let px = 0; px < TILE_PX; px++) {
             const v = bil[py * TILE_PX + px];
             grid[(offY + py) * gCols + (offX + px)] = (v < BIL_NODATA / 2) ? NaN : v;
           }
-        }
       } else {
         errs++;
-        log(`✗ MNT tuile L${L}/${tc}/${tr} : ${results[j].reason?.message}`, 'warn');
+        log(`✗ MNT L${L}/${tileList[i+j]?.tc}/${tileList[i+j]?.tr} : ${results[j].reason?.message}`, 'warn');
       }
       done++;
     }
@@ -222,8 +220,7 @@ async function getMNT(bbox, mntZoom) {
 
   let vmin=Infinity, vmax=-Infinity, nv=0;
   for (const v of grid) if (!isNaN(v)) { if(v<vmin) vmin=v; if(v>vmax) vmax=v; nv++; }
-  log(`MNT BIL : ${nv}/${gCols*gRows} px valides — alt. ${vmin.toFixed(1)} / ${vmax.toFixed(1)} m NGF`, 'ok');
-
+  log(`MNT : ${nv}/${gCols*gRows} px — alt. [${vmin.toFixed(1)}, ${vmax.toFixed(1)}] m NGF`, 'ok');
   return { grid, cols: gCols, rows: gRows, bbox: gridBBox };
 }
 
@@ -552,12 +549,14 @@ $('btnEstran').addEventListener('click',async()=>{
     const {grid, cols, rows, bbox: gridBBox} = await getMNT(ST.bbox, zoom);
 
     await prog('Construction masque estran…', 33);
+    log('Masque estran : classification des pixels…', 'info');
     const mask = makeMaskEstran(grid, cols, rows, bmve, pmve);
     const nCells = mask.reduce((s,v) => s+v, 0);
     log(`Masque estran : ${nCells}/${cols*rows} cellules`, 'info');
     if(!nCells) throw new Error(`Aucune cellule entre ${bmve} m et ${pmve} m NGF.`);
 
-    await prog('Vectorisation…', 36);
+    await prog('Vectorisation Marching Squares…', 36);
+    log('Vectorisation du contour estran…', 'info');
     const poly = maskToGeoJSON(mask, cols, rows, gridBBox);
     if(!poly) throw new Error('Vectorisation échouée — élargissez la zone ou ajustez les seuils.');
 
