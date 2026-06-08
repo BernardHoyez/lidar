@@ -153,53 +153,57 @@ async function apiFetch(url){
 // ═══════════════════════════════════════════════════════════════════
 
 // ── MNT RGE Alti (API REST) ────────────────────────────────────────
-async function getMNT(bbox,res){
-  const latM=(bbox.minLat+bbox.maxLat)/2;
-  const dLon=res/(111320*Math.cos(latM*Math.PI/180));
-  const dLat=res/111320;
-  const MAXD=80;
-  const cols=Math.min(MAXD,Math.max(2,Math.round((bbox.maxLon-bbox.minLon)/dLon)+1));
-  const rows=Math.min(MAXD,Math.max(2,Math.round((bbox.maxLat-bbox.minLat)/dLat)+1));
-  const sLon=(bbox.maxLon-bbox.minLon)/(cols-1);
-  const sLat=(bbox.maxLat-bbox.minLat)/(rows-1);
-  const total=cols*rows;
-  const nReq=Math.ceil(total/BATCH);
-  log(`Grille MNT ${cols}×${rows} pts — ${nReq} requêtes alti`,'info');
-  await prog(`Altimétrie 0/${total} pts`,5);
-  const grid=new Float32Array(total).fill(NaN);
-  let fetched=0;
-  for(let i=0;i<total;i+=BATCH){
+async function getMNT(bbox, res){
+  const latM = (bbox.minLat + bbox.maxLat) / 2;
+  const dLon = res / (111320 * Math.cos(latM * Math.PI / 180));
+  const dLat = res / 111320;
+  // Pas de limite arbitraire — on utilise la résolution demandée
+  // mais on plafonne à 400×400 pour éviter des milliers de requêtes
+  const MAXD = 400;
+  const cols = Math.min(MAXD, Math.max(2, Math.round((bbox.maxLon - bbox.minLon) / dLon) + 1));
+  const rows = Math.min(MAXD, Math.max(2, Math.round((bbox.maxLat - bbox.minLat) / dLat) + 1));
+  const sLon = (bbox.maxLon - bbox.minLon) / (cols - 1);
+  const sLat = (bbox.maxLat - bbox.minLat) / (rows - 1);
+  const total = cols * rows;
+  const nReq = Math.ceil(total / BATCH);
+  const resReel = ((bbox.maxLon - bbox.minLon) / (cols-1) * 111320 * Math.cos(latM*Math.PI/180)).toFixed(1);
+  log(`Grille MNT ${cols}×${rows} pts (~${resReel} m/pt) — ${nReq} requêtes alti`, 'info');
+  if(nReq > 200) log(`⚠ ${nReq} requêtes — peut prendre quelques minutes`, 'warn');
+  await prog(`Altimétrie 0/${total} pts`, 5);
+  const grid = new Float32Array(total).fill(NaN);
+  let fetched = 0;
+  for(let i = 0; i < total; i += BATCH){
     if(ST.ac.signal.aborted) throw new Error('Annulé');
-    const sz=Math.min(BATCH,total-i);
-    const lons=[],lats=[];
-    for(let j=0;j<sz;j++){
-      const idx=i+j, c=idx%cols, r=Math.floor(idx/cols);
-      lons.push(bbox.minLon+c*sLon);
-      lats.push(bbox.maxLat-r*sLat);
+    const sz = Math.min(BATCH, total - i);
+    const lons = [], lats = [];
+    for(let j = 0; j < sz; j++){
+      const idx = i+j, c = idx % cols, r = Math.floor(idx / cols);
+      lons.push(bbox.minLon + c * sLon);
+      lats.push(bbox.maxLat - r * sLat);
     }
-    const url=IGN_ALTI+'?'+new URLSearchParams({
-      lon:lons.map(v=>v.toFixed(6)).join('|'),
-      lat:lats.map(v=>v.toFixed(6)).join('|'),
-      resource:ALTI_RES,delimiter:'|',indent:'false',measures:'false',zonly:'false'
+    const url = IGN_ALTI + '?' + new URLSearchParams({
+      lon: lons.map(v => v.toFixed(6)).join('|'),
+      lat: lats.map(v => v.toFixed(6)).join('|'),
+      resource: ALTI_RES, delimiter: '|', indent: 'false', measures: 'false', zonly: 'false'
     });
     try{
-      const d=await (await apiFetch(url)).json();
-      (d.elevations||[]).forEach((e,j)=>{
-        const z=e.z;
+      const d = await (await apiFetch(url)).json();
+      (d.elevations || []).forEach((e, j) => {
+        const z = e.z;
         grid[i+j] = (z == null || z < -500) ? NaN : Number(z);
       });
     }catch(e){
-      if(e.message==='Annulé') throw e;
-      log(`Req ${Math.ceil(i/BATCH)+1}/${nReq} échouée : ${e.message}`,'warn');
+      if(e.message === 'Annulé') throw e;
+      log(`Req ${Math.ceil(i/BATCH)+1}/${nReq} échouée : ${e.message}`, 'warn');
     }
-    fetched+=sz;
-    await prog(`Altimétrie ${fetched}/${total} pts`,5+25*(fetched/total));
-    if(i+BATCH<total) await new Promise(r=>setTimeout(r,DELAY_MS));
+    fetched += sz;
+    await prog(`Altimétrie ${fetched}/${total} pts`, 5 + 25*(fetched/total));
+    if(i + BATCH < total) await new Promise(r => setTimeout(r, DELAY_MS));
   }
-  let vmin=Infinity,vmax=-Infinity,nv=0;
-  for(const v of grid) if(!isNaN(v)){if(v<vmin)vmin=v;if(v>vmax)vmax=v;nv++;}
-  log(`MNT : ${nv}/${total} pts valides — alt. ${vmin.toFixed(2)} / ${vmax.toFixed(2)} m NGF`,'ok');
-  return{grid,cols,rows};
+  let vmin=Infinity, vmax=-Infinity, nv=0;
+  for(const v of grid) if(!isNaN(v)){if(v<vmin)vmin=v; if(v>vmax)vmax=v; nv++;}
+  log(`MNT : ${nv}/${total} pts valides — alt. ${vmin.toFixed(2)} / ${vmax.toFixed(2)} m NGF`, 'ok');
+  return {grid, cols, rows};
 }
 
 // ── Masque estran ──────────────────────────────────────────────────
