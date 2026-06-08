@@ -206,28 +206,100 @@ async function getMNT(bbox, res){
   return {grid, cols, rows};
 }
 
-// ── Masque estran ──────────────────────────────────────────────────
-function makeMaskEstran(grid,cols,rows,bmve,pmve){
-  const m=new Uint8Array(cols*rows);
-  for(let i=0;i<grid.length;i++){
-    const v=grid[i];
-    if(!isNaN(v)&&v>=bmve&&v<=pmve) m[i]=1;
+// ── Masque estran — flood-fill depuis la mer ───────────────────────
+// Stratégie :
+// 1. Identifier les cellules "mer" = v < bmve ou NaN côté mer
+// 2. Flood-fill depuis les bords du domaine pour trouver toute la mer connexe
+// 3. L'estran = cellules v <= pmve ET connectées (voisines) à la zone mer
+//    → on dilate la zone mer jusqu'à pmve
+function makeMaskEstran(grid, cols, rows, bmve, pmve) {
+  const SEA  = 1;  // mer (< bmve ou NaN connecté à la mer)
+  const INTR = 2;  // estran [bmve, pmve]
+  const state = new Uint8Array(cols * rows); // 0=terre/inconnu
+
+  // Passe 1 : classer les cellules connues
+  for (let i = 0; i < grid.length; i++) {
+    const v = grid[i];
+    if (isNaN(v) || v < bmve)       state[i] = SEA;
+    else if (v <= pmve)             state[i] = INTR;
+    // v > pmve → 0 (terre, hors estran)
   }
-  // NaN entourés de valeurs ≤ bmve → mer ouverte → inclure
-  for(let r=0;r<rows;r++){
-    for(let c=0;c<cols;c++){
-      const i=r*cols+c;
-      if(!isNaN(grid[i])) continue;
-      const nb=[];
-      if(c>0)      nb.push(grid[i-1]);
-      if(c<cols-1) nb.push(grid[i+1]);
-      if(r>0)      nb.push(grid[i-cols]);
-      if(r<rows-1) nb.push(grid[i+cols]);
-      const valid=nb.filter(x=>!isNaN(x));
-      if(valid.length>0&&valid.every(x=>x<=bmve)) m[i]=1;
+
+  // Passe 2 : flood-fill BFS depuis tous les bords marqués SEA
+  // pour ne garder que la mer connexe à l'extérieur
+  // (évite d'inclure des mares intérieures isolées comme mer)
+  const seaConnected = new Uint8Array(cols * rows);
+  const queue = [];
+
+  // Amorcer depuis les 4 bords
+  for (let c = 0; c < cols; c++) {
+    if (state[c] === SEA)                    { seaConnected[c] = 1; queue.push(c); }
+    const bot = (rows-1)*cols + c;
+    if (state[bot] === SEA)                  { seaConnected[bot] = 1; queue.push(bot); }
+  }
+  for (let r = 0; r < rows; r++) {
+    const l = r*cols, ri = r*cols + cols-1;
+    if (state[l]  === SEA) { seaConnected[l]  = 1; queue.push(l); }
+    if (state[ri] === SEA) { seaConnected[ri] = 1; queue.push(ri); }
+  }
+
+  // BFS — la mer connexe peut traverser des cellules NaN (estuaires, chenaux)
+  let qi = 0;
+  while (qi < queue.length) {
+    const i = queue[qi++];
+    const r = Math.floor(i / cols), c = i % cols;
+    const nbrs = [];
+    if (c > 0)       nbrs.push(i - 1);
+    if (c < cols-1)  nbrs.push(i + 1);
+    if (r > 0)       nbrs.push(i - cols);
+    if (r < rows-1)  nbrs.push(i + cols);
+    for (const j of nbrs) {
+      if (!seaConnected[j] && state[j] === SEA) {
+        seaConnected[j] = 1;
+        queue.push(j);
+      }
     }
   }
-  return m;
+
+  // Passe 3 : l'estran final = cellules INTR adjacentes à la mer connexe
+  // On dilate la mer connexe vers les cellules INTR (BFS de l'estran)
+  const mask = new Uint8Array(cols * rows);
+  const q2 = [];
+
+  // Amorcer : cellules INTR voisines d'une cellule mer connexe
+  for (let i = 0; i < cols * rows; i++) {
+    if (state[i] !== INTR) continue;
+    const r = Math.floor(i / cols), c = i % cols;
+    const nbrs = [];
+    if (c > 0)       nbrs.push(i - 1);
+    if (c < cols-1)  nbrs.push(i + 1);
+    if (r > 0)       nbrs.push(i - cols);
+    if (r < rows-1)  nbrs.push(i + cols);
+    if (nbrs.some(j => seaConnected[j])) {
+      mask[i] = 1;
+      q2.push(i);
+    }
+  }
+
+  // BFS de l'estran connexe
+  let q2i = 0;
+  while (q2i < q2.length) {
+    const i = q2[q2i++];
+    const r = Math.floor(i / cols), c = i % cols;
+    const nbrs = [];
+    if (c > 0)       nbrs.push(i - 1);
+    if (c < cols-1)  nbrs.push(i + 1);
+    if (r > 0)       nbrs.push(i - cols);
+    if (r < rows-1)  nbrs.push(i + cols);
+    for (const j of nbrs) {
+      if (!mask[j] && state[j] === INTR) {
+        mask[j] = 1;
+        q2.push(j);
+      }
+    }
+  }
+
+  return mask;
 }
 
 // ── Marching Squares ───────────────────────────────────────────────
