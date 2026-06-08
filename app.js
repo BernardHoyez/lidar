@@ -147,6 +147,115 @@ async function apiFetch(url){
   return r;
 }
 
+// ── FONCTIONS WMTS LIDAR ───────────────────────────────────────────
+
+// TileMatrixSet WGS84G
+const wgs84Cols=L=>1<<(L+1);
+const wgs84Rows=L=>1<<L;
+function ll2wgs84(lon,lat,L){
+  const nC=wgs84Cols(L),nR=wgs84Rows(L);
+  return{
+    col:Math.max(0,Math.min(nC-1,Math.floor((lon+180)/360*nC))),
+    row:Math.max(0,Math.min(nR-1,Math.floor((90-lat)/180*nR)))
+  };
+}
+function tileResWGS84(row,L){
+  const nR=wgs84Rows(L);
+  return 180/nR/TILE_PX*111320; // m/px
+}
+
+// Convertit tuile XYZ PM → tuile WGS84G au niveau L clampé dans [6,14]
+function pm2wgs84(x, y, z, L) {
+  const wgsL = Math.max(WGS84G_LMIN, Math.min(WGS84G_LMAX, L));
+  const n = 1 << z;
+  const lon = (x + 0.5) / n * 360 - 180;
+  const lat = Math.atan(Math.sinh(Math.PI * (1 - 2*(y+0.5)/n))) * 180 / Math.PI;
+  return { ...ll2wgs84(lon, lat, wgsL), wgsL };
+}
+
+// Fetch BIL float32
+async function fetchBIL(col,row,L){
+  const url=IGN_WMTS
+    +`?SERVICE=WMTS&VERSION=1.0.0&REQUEST=GetTile`
+    +`&LAYER=${MNT_LAYER}&STYLE=normal`
+    +`&FORMAT=${encodeURIComponent(MNT_FMT)}`
+    +`&TILEMATRIXSET=${MNT_TMS}`
+    +`&TILEMATRIX=${L}&TILEROW=${row}&TILECOL=${col}`;
+  const resp=await apiFetch(url);
+  const ct=resp.headers.get('content-type')||'';
+  if(ct.includes('xml')||ct.includes('html')||ct.includes('text')){
+    const txt=await resp.text();
+    throw new Error(`WMTS erreur: ${txt.slice(0,100)}`);
+  }
+  const buf=await resp.arrayBuffer();
+  if(buf.byteLength<TILE_PX*TILE_PX*4)
+    throw new Error(`BIL trop court (${buf.byteLength}b)`);
+  return new Float32Array(buf,0,TILE_PX*TILE_PX);
+}
+
+// Cache BIL
+const bilCache=new Map();
+async function fetchBILcached(col,row,L){
+  const k=`${L}/${col}/${row}`;
+  if(bilCache.has(k)) return bilCache.get(k);
+  const bil=await fetchBIL(col,row,L);
+  bilCache.set(k,bil);
+  return bil;
+}
+
+// Algorithme de Horn — pente en degrés
+function hornSlope(elev, w, h, cellM) {
+  const slope = new Float32Array(w*h).fill(NaN);
+  for (let r = 1; r < h-1; r++) {
+    for (let c = 1; c < w-1; c++) {
+      const i = r*w+c;
+      if (elev[i] <= BIL_NODATA/2) continue;  // nodata IGN ≈ -99999
+      const fix = v => (v <= BIL_NODATA/2 ? elev[i] : v);
+      const a=fix(elev[(r-1)*w+(c-1)]), b=fix(elev[(r-1)*w+c]), cc=fix(elev[(r-1)*w+(c+1)]);
+      const d=fix(elev[r*w+(c-1)]),                               f=fix(elev[r*w+(c+1)]);
+      const g=fix(elev[(r+1)*w+(c-1)]), hh=fix(elev[(r+1)*w+c]), ii=fix(elev[(r+1)*w+(c+1)]);
+      const dzdx = ((cc + 2*f + ii) - (a + 2*d + g)) / (8*cellM);
+      const dzdy = ((g + 2*hh + ii) - (a + 2*b + cc)) / (8*cellM);
+      slope[i] = Math.atan(Math.sqrt(dzdx*dzdx + dzdy*dzdy)) * 180 / Math.PI;
+    }
+  }
+  return slope;
+}
+
+// Rendu canvas niveaux de gris
+function renderTilePNG(slope,sMin,sMax){
+  const canvas=document.createElement('canvas');
+  canvas.width=canvas.height=TILE_PX;
+  const ctx=canvas.getContext('2d');
+  const id=ctx.createImageData(TILE_PX,TILE_PX);
+  const px=id.data;
+  const range=sMax-sMin||1;
+  for(let i=0;i<TILE_PX*TILE_PX;i++){
+    const v=slope[i];
+    let g=0;
+    if(!isNaN(v)&&v>=sMin) g=Math.min(255,Math.round((v-sMin)/range*255));
+    px[i*4]=px[i*4+1]=px[i*4+2]=g; px[i*4+3]=255;
+  }
+  ctx.putImageData(id,0,0);
+  return canvas;
+}
+
+// Canvas → PNG Uint8Array
+async function canvasToPNG(canvas){
+  if(typeof OffscreenCanvas!=='undefined'){
+    const oc=new OffscreenCanvas(TILE_PX,TILE_PX);
+    oc.getContext('2d').drawImage(canvas,0,0);
+    const blob=await oc.convertToBlob({type:'image/png'});
+    return new Uint8Array(await blob.arrayBuffer());
+  }
+  const b64=canvas.toDataURL('image/png').split(',')[1];
+  const bin=atob(b64);
+  const arr=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+  return arr;
+}
+
+
 // ═══════════════════════════════════════════════════════════════════
 //  ÉTAPE 1 : ESTRAN
 //  MNT depuis tuiles WMTS BIL (même source que pentes, bien plus dense)
@@ -418,114 +527,6 @@ function tilesFromMask(mask,cols,rows,bbox,zoom){
     }
   }
   return [...tileSet].map(k=>{const[z,x,y]=k.split('/').map(Number);return{z,x,y};});
-}
-
-// ── FONCTIONS WMTS LIDAR ───────────────────────────────────────────
-
-// TileMatrixSet WGS84G
-const wgs84Cols=L=>1<<(L+1);
-const wgs84Rows=L=>1<<L;
-function ll2wgs84(lon,lat,L){
-  const nC=wgs84Cols(L),nR=wgs84Rows(L);
-  return{
-    col:Math.max(0,Math.min(nC-1,Math.floor((lon+180)/360*nC))),
-    row:Math.max(0,Math.min(nR-1,Math.floor((90-lat)/180*nR)))
-  };
-}
-function tileResWGS84(row,L){
-  const nR=wgs84Rows(L);
-  return 180/nR/TILE_PX*111320; // m/px
-}
-
-// Convertit tuile XYZ PM → tuile WGS84G au niveau L clampé dans [6,14]
-function pm2wgs84(x, y, z, L) {
-  const wgsL = Math.max(WGS84G_LMIN, Math.min(WGS84G_LMAX, L));
-  const n = 1 << z;
-  const lon = (x + 0.5) / n * 360 - 180;
-  const lat = Math.atan(Math.sinh(Math.PI * (1 - 2*(y+0.5)/n))) * 180 / Math.PI;
-  return { ...ll2wgs84(lon, lat, wgsL), wgsL };
-}
-
-// Fetch BIL float32
-async function fetchBIL(col,row,L){
-  const url=IGN_WMTS
-    +`?SERVICE=WMTS&VERSION=1.0.0&REQUEST=GetTile`
-    +`&LAYER=${MNT_LAYER}&STYLE=normal`
-    +`&FORMAT=${encodeURIComponent(MNT_FMT)}`
-    +`&TILEMATRIXSET=${MNT_TMS}`
-    +`&TILEMATRIX=${L}&TILEROW=${row}&TILECOL=${col}`;
-  const resp=await apiFetch(url);
-  const ct=resp.headers.get('content-type')||'';
-  if(ct.includes('xml')||ct.includes('html')||ct.includes('text')){
-    const txt=await resp.text();
-    throw new Error(`WMTS erreur: ${txt.slice(0,100)}`);
-  }
-  const buf=await resp.arrayBuffer();
-  if(buf.byteLength<TILE_PX*TILE_PX*4)
-    throw new Error(`BIL trop court (${buf.byteLength}b)`);
-  return new Float32Array(buf,0,TILE_PX*TILE_PX);
-}
-
-// Cache BIL
-const bilCache=new Map();
-async function fetchBILcached(col,row,L){
-  const k=`${L}/${col}/${row}`;
-  if(bilCache.has(k)) return bilCache.get(k);
-  const bil=await fetchBIL(col,row,L);
-  bilCache.set(k,bil);
-  return bil;
-}
-
-// Algorithme de Horn — pente en degrés
-function hornSlope(elev, w, h, cellM) {
-  const slope = new Float32Array(w*h).fill(NaN);
-  for (let r = 1; r < h-1; r++) {
-    for (let c = 1; c < w-1; c++) {
-      const i = r*w+c;
-      if (elev[i] <= BIL_NODATA/2) continue;  // nodata IGN ≈ -99999
-      const fix = v => (v <= BIL_NODATA/2 ? elev[i] : v);
-      const a=fix(elev[(r-1)*w+(c-1)]), b=fix(elev[(r-1)*w+c]), cc=fix(elev[(r-1)*w+(c+1)]);
-      const d=fix(elev[r*w+(c-1)]),                               f=fix(elev[r*w+(c+1)]);
-      const g=fix(elev[(r+1)*w+(c-1)]), hh=fix(elev[(r+1)*w+c]), ii=fix(elev[(r+1)*w+(c+1)]);
-      const dzdx = ((cc + 2*f + ii) - (a + 2*d + g)) / (8*cellM);
-      const dzdy = ((g + 2*hh + ii) - (a + 2*b + cc)) / (8*cellM);
-      slope[i] = Math.atan(Math.sqrt(dzdx*dzdx + dzdy*dzdy)) * 180 / Math.PI;
-    }
-  }
-  return slope;
-}
-
-// Rendu canvas niveaux de gris
-function renderTilePNG(slope,sMin,sMax){
-  const canvas=document.createElement('canvas');
-  canvas.width=canvas.height=TILE_PX;
-  const ctx=canvas.getContext('2d');
-  const id=ctx.createImageData(TILE_PX,TILE_PX);
-  const px=id.data;
-  const range=sMax-sMin||1;
-  for(let i=0;i<TILE_PX*TILE_PX;i++){
-    const v=slope[i];
-    let g=0;
-    if(!isNaN(v)&&v>=sMin) g=Math.min(255,Math.round((v-sMin)/range*255));
-    px[i*4]=px[i*4+1]=px[i*4+2]=g; px[i*4+3]=255;
-  }
-  ctx.putImageData(id,0,0);
-  return canvas;
-}
-
-// Canvas → PNG Uint8Array
-async function canvasToPNG(canvas){
-  if(typeof OffscreenCanvas!=='undefined'){
-    const oc=new OffscreenCanvas(TILE_PX,TILE_PX);
-    oc.getContext('2d').drawImage(canvas,0,0);
-    const blob=await oc.convertToBlob({type:'image/png'});
-    return new Uint8Array(await blob.arrayBuffer());
-  }
-  const b64=canvas.toDataURL('image/png').split(',')[1];
-  const bin=atob(b64);
-  const arr=new Uint8Array(bin.length);
-  for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
-  return arr;
 }
 
 // ── PIPELINE ───────────────────────────────────────────────────────
