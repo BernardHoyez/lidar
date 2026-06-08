@@ -2,7 +2,7 @@
    LIDAR_PENTE v3.2.0
    Détection d'irrégularités topographiques sur l'estran
    ───────────────────────────────────────────────────────────────
-   Étape 1 : Rectangle → MNT RGE Alti → masque estran [BMVE, PMVE]
+   Étape 1 : Rectangle → MNT BIL WMTS → masque estran [BMVE, PMVE]
              → polygone estran affiché sur la carte
    Étape 2 : WMTS LIDAR BIL float32 uniquement sur les tuiles
              intersectant l'estran → calcul pente Horn → grille pente
@@ -149,61 +149,82 @@ async function apiFetch(url){
 
 // ═══════════════════════════════════════════════════════════════════
 //  ÉTAPE 1 : ESTRAN
-//  MNT RGE Alti → masque [BMVE, PMVE] → polygone → carte
+//  MNT depuis tuiles WMTS BIL (même source que pentes, bien plus dense)
+//  → masque [BMVE, PMVE] → polygone → carte
 // ═══════════════════════════════════════════════════════════════════
 
-// ── MNT RGE Alti (API REST) ────────────────────────────────────────
-async function getMNT(bbox, res){
-  const latM = (bbox.minLat + bbox.maxLat) / 2;
-  const dLon = res / (111320 * Math.cos(latM * Math.PI / 180));
-  const dLat = res / 111320;
-  // Pas de limite arbitraire — on utilise la résolution demandée
-  // mais on plafonne à 400×400 pour éviter des milliers de requêtes
-  const MAXD = 400;
-  const cols = Math.min(MAXD, Math.max(2, Math.round((bbox.maxLon - bbox.minLon) / dLon) + 1));
-  const rows = Math.min(MAXD, Math.max(2, Math.round((bbox.maxLat - bbox.minLat) / dLat) + 1));
-  const sLon = (bbox.maxLon - bbox.minLon) / (cols - 1);
-  const sLat = (bbox.maxLat - bbox.minLat) / (rows - 1);
-  const total = cols * rows;
-  const nReq = Math.ceil(total / BATCH);
-  const resReel = ((bbox.maxLon - bbox.minLon) / (cols-1) * 111320 * Math.cos(latM*Math.PI/180)).toFixed(1);
-  log(`Grille MNT ${cols}×${rows} pts (~${resReel} m/pt) — ${nReq} requêtes alti`, 'info');
-  if(nReq > 200) log(`⚠ ${nReq} requêtes — peut prendre quelques minutes`, 'warn');
-  await prog(`Altimétrie 0/${total} pts`, 5);
-  const grid = new Float32Array(total).fill(NaN);
-  let fetched = 0;
-  for(let i = 0; i < total; i += BATCH){
-    if(ST.ac.signal.aborted) throw new Error('Annulé');
-    const sz = Math.min(BATCH, total - i);
-    const lons = [], lats = [];
-    for(let j = 0; j < sz; j++){
-      const idx = i+j, c = idx % cols, r = Math.floor(idx / cols);
-      lons.push(bbox.minLon + c * sLon);
-      lats.push(bbox.maxLat - r * sLat);
+// ── MNT depuis WMTS BIL ─────────────────────────────────────────────
+// On télécharge toutes les tuiles WGS84G couvrant la bbox au niveau L,
+// on les assemble en une grille d'altitudes dense, puis on applique le masque.
+async function getMNT(bbox, mntZoom) {
+  // Niveau WGS84G : utiliser le niveau demandé, clampé dans [6,14]
+  const L = Math.max(WGS84G_LMIN, Math.min(WGS84G_LMAX, mntZoom));
+
+  // Tuiles WGS84G couvrant la bbox
+  const nC = wgs84Cols(L), nR = wgs84Rows(L);
+  const col0 = Math.max(0, Math.floor((bbox.minLon + 180) / 360 * nC));
+  const col1 = Math.min(nC-1, Math.floor((bbox.maxLon + 180) / 360 * nC));
+  const row0 = Math.max(0, Math.floor((90 - bbox.maxLat) / 180 * nR));
+  const row1 = Math.min(nR-1, Math.floor((90 - bbox.minLat) / 180 * nR));
+
+  const tilesCols = col1 - col0 + 1;
+  const tilesRows = row1 - row0 + 1;
+  const nTiles = tilesCols * tilesRows;
+
+  // Grille résultante : assemblage de TILE_PX×TILE_PX par tuile
+  const gCols = tilesCols * TILE_PX;
+  const gRows = tilesRows * TILE_PX;
+  const grid  = new Float32Array(gCols * gRows).fill(NaN);
+
+  // BBox réelle couverte par l'assemblage (pas exactement == bbox demandée)
+  const tl = wgs84TileBBox(col0, row0, L);
+  const br = wgs84TileBBox(col1, row1, L);
+  const gridBBox = {
+    minLon: tl.minLon, maxLon: br.maxLon,
+    minLat: br.minLat, maxLat: tl.maxLat
+  };
+
+  const resM = tileResWGS84(row0, L).toFixed(1);
+  log(`Grille MNT BIL : ${tilesCols}×${tilesRows} tuiles WGS84G L=${L} → ${gCols}×${gRows} px (~${resM} m/px)`, 'info');
+  await prog(`MNT 0/${nTiles} tuiles`, 3);
+
+  let done = 0, errs = 0;
+  const tileList = [];
+  for (let tc = col0; tc <= col1; tc++)
+    for (let tr = row0; tr <= row1; tr++)
+      tileList.push({tc, tr});
+
+  for (let i = 0; i < tileList.length; i += CONCUR) {
+    if (ST.ac.signal.aborted) throw new Error('Annulé');
+    const batch = tileList.slice(i, i + CONCUR);
+    const results = await Promise.allSettled(batch.map(({tc, tr}) => fetchBILcached(tc, tr, L)));
+    for (let j = 0; j < batch.length; j++) {
+      const {tc, tr} = batch[j];
+      if (results[j].status === 'fulfilled') {
+        const bil = results[j].value;
+        // Copier les TILE_PX×TILE_PX valeurs dans la grille assemblée
+        const offX = (tc - col0) * TILE_PX;
+        const offY = (tr - row0) * TILE_PX;
+        for (let py = 0; py < TILE_PX; py++) {
+          for (let px = 0; px < TILE_PX; px++) {
+            const v = bil[py * TILE_PX + px];
+            grid[(offY + py) * gCols + (offX + px)] = (v < BIL_NODATA / 2) ? NaN : v;
+          }
+        }
+      } else {
+        errs++;
+        log(`✗ MNT tuile L${L}/${tc}/${tr} : ${results[j].reason?.message}`, 'warn');
+      }
+      done++;
     }
-    const url = IGN_ALTI + '?' + new URLSearchParams({
-      lon: lons.map(v => v.toFixed(6)).join('|'),
-      lat: lats.map(v => v.toFixed(6)).join('|'),
-      resource: ALTI_RES, delimiter: '|', indent: 'false', measures: 'false', zonly: 'false'
-    });
-    try{
-      const d = await (await apiFetch(url)).json();
-      (d.elevations || []).forEach((e, j) => {
-        const z = e.z;
-        grid[i+j] = (z == null || z < -500) ? NaN : Number(z);
-      });
-    }catch(e){
-      if(e.message === 'Annulé') throw e;
-      log(`Req ${Math.ceil(i/BATCH)+1}/${nReq} échouée : ${e.message}`, 'warn');
-    }
-    fetched += sz;
-    await prog(`Altimétrie ${fetched}/${total} pts`, 5 + 25*(fetched/total));
-    if(i + BATCH < total) await new Promise(r => setTimeout(r, DELAY_MS));
+    await prog(`MNT ${done}/${nTiles} tuiles${errs ? ` (${errs} err)` : ''}`, 3 + 27*(done/nTiles));
   }
+
   let vmin=Infinity, vmax=-Infinity, nv=0;
-  for(const v of grid) if(!isNaN(v)){if(v<vmin)vmin=v; if(v>vmax)vmax=v; nv++;}
-  log(`MNT : ${nv}/${total} pts valides — alt. ${vmin.toFixed(2)} / ${vmax.toFixed(2)} m NGF`, 'ok');
-  return {grid, cols, rows};
+  for (const v of grid) if (!isNaN(v)) { if(v<vmin) vmin=v; if(v>vmax) vmax=v; nv++; }
+  log(`MNT BIL : ${nv}/${gCols*gRows} px valides — alt. ${vmin.toFixed(1)} / ${vmax.toFixed(1)} m NGF`, 'ok');
+
+  return { grid, cols: gCols, rows: gRows, bbox: gridBBox };
 }
 
 // ── Masque estran — flood-fill depuis la mer ───────────────────────
@@ -522,35 +543,34 @@ $('btnEstran').addEventListener('click',async()=>{
 
   const bmve   = parseFloat($('bmveAlt').value)||-3;
   const pmve   = parseFloat($('pmveAlt').value)||5;
-  const res    = parseInt($('mntRes').value)||5;
   const zoom   = parseInt($('tileZoom').value)||14;
-  log(`▶ BMVE=${bmve}m  PMVE=${pmve}m  résol=${res}m  zoom=${zoom}`,'info');
+  log(`▶ BMVE=${bmve}m  PMVE=${pmve}m  zoom=${zoom}`, 'info');
 
   try{
-    // ── ÉTAPE 1 : MNT → masque estran → polygone ──────────────────
-    await prog('Téléchargement altimétrie RGE Alti…',2);
-    const{grid,cols,rows}=await getMNT(ST.bbox,res);
+    // ── ÉTAPE 1 : MNT BIL → masque estran → polygone ─────────────
+    await prog('Téléchargement MNT BIL (tuiles WGS84G)…', 2);
+    const {grid, cols, rows, bbox: gridBBox} = await getMNT(ST.bbox, zoom);
 
-    await prog('Construction masque estran…',33);
-    const mask=makeMaskEstran(grid,cols,rows,bmve,pmve);
-    const nCells=mask.reduce((s,v)=>s+v,0);
-    log(`Masque estran : ${nCells}/${cols*rows} cellules`,'info');
+    await prog('Construction masque estran…', 33);
+    const mask = makeMaskEstran(grid, cols, rows, bmve, pmve);
+    const nCells = mask.reduce((s,v) => s+v, 0);
+    log(`Masque estran : ${nCells}/${cols*rows} cellules`, 'info');
     if(!nCells) throw new Error(`Aucune cellule entre ${bmve} m et ${pmve} m NGF.`);
 
-    await prog('Vectorisation…',36);
-    const poly=maskToGeoJSON(mask,cols,rows,ST.bbox);
+    await prog('Vectorisation…', 36);
+    const poly = maskToGeoJSON(mask, cols, rows, gridBBox);
     if(!poly) throw new Error('Vectorisation échouée — élargissez la zone ou ajustez les seuils.');
 
-    ST.mask=mask; ST.cols=cols; ST.rows=rows; ST.poly=poly;
-    const ha=(turf.area(poly)/10000).toFixed(1);
-    log(`Polygone estran : ${ha} ha`,'ok');
-    estranLyr=L.geoJSON(poly,{
+    ST.mask=mask; ST.cols=cols; ST.rows=rows; ST.poly=poly; ST.gridBBox=gridBBox;
+    const ha = (turf.area(poly)/10000).toFixed(1);
+    log(`Polygone estran : ${ha} ha`, 'ok');
+    estranLyr = L.geoJSON(poly, {
       style:{color:'#00c8a0',weight:2,fillColor:'#00c8a0',fillOpacity:0.22}
     }).addTo(map);
 
     // ── ÉTAPE 2 : tuiles LIDAR → pentes Horn ──────────────────────
-    await prog('Sélection tuiles depuis masque…',40);
-    const tilesXYZ=tilesFromMask(ST.mask,ST.cols,ST.rows,ST.bbox,zoom);
+    await prog('Sélection tuiles depuis masque…', 40);
+    const tilesXYZ = tilesFromMask(ST.mask, ST.cols, ST.rows, gridBBox, zoom);
     log(`${tilesXYZ.length} tuile(s) intersectant l'estran`,'ok');
     if(!tilesXYZ.length) throw new Error('Aucune tuile sélectionnée.');
     if(tilesXYZ.length>2000) log(`⚠ ${tilesXYZ.length} tuiles — peut être long.`,'warn');
