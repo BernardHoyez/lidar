@@ -112,9 +112,10 @@ map.on('mouseout',()=>{mapInfo.style.display='none';});
 function resetState(){
   ST.mask=ST.poly=ST.slope=ST.tiles=ST.mbt=null;
   ST.cols=ST.rows=0;
-  if(estranLyr){map.removeLayer(estranLyr);estranLyr=null;}
-  dlEl.classList.remove('visible');
-  $('visuSection').style.display='none';
+  if(estranLyr){try{map.removeLayer(estranLyr);}catch(e){} estranLyr=null;}
+  try{ dlEl.classList.remove('visible'); }catch(e){}
+  try{ $('visuSection').style.display='none'; }catch(e){}
+  console.log('[LIDAR] resetState OK');
 }
 function updateCoords(){
   const b=ST.bbox;
@@ -266,6 +267,7 @@ async function canvasToPNG(canvas){
 // On télécharge toutes les tuiles WGS84G couvrant la bbox au niveau L,
 // on les assemble en une grille d'altitudes dense, puis on applique le masque.
 async function getMNT(bbox, mntZoom) {
+  console.log('[LIDAR] getMNT start', bbox, mntZoom);
   // Pour le masque estran, on n'a pas besoin de la pleine résolution LIDAR.
   // On utilise un niveau plus bas pour avoir ~30-50 m/px → grille légère et rapide.
   // Niveau 11 → ~75 m/px (~4-8 tuiles sur une zone côtière typique)
@@ -531,18 +533,27 @@ function tilesFromMask(mask,cols,rows,bbox,zoom){
 
 // ── PIPELINE ───────────────────────────────────────────────────────
 $('btnEstran').addEventListener('click',async()=>{
-  if(!ST.bbox) return;
+  console.log('[LIDAR] Click btnEstran, ST.bbox=', ST.bbox);
+  if(!ST.bbox){ console.log('[LIDAR] Pas de bbox, retour'); return; }
   ST.t0=Date.now();
   ST.ac=new AbortController();
   $('btnEstran').disabled=true;
   $('btnAbort').disabled=false;
   setStatus('run');
+
+  // Log AVANT resetState pour voir si on arrive ici
+  log('▶ Démarrage traitement…', 'info');
+  console.log('[LIDAR] Avant resetState');
+
   resetState();
+
+  console.log('[LIDAR] Après resetState');
 
   const bmve   = parseFloat($('bmveAlt').value)||-3;
   const pmve   = parseFloat($('pmveAlt').value)||5;
   const zoom   = parseInt($('tileZoom').value)||14;
   log(`▶ BMVE=${bmve}m  PMVE=${pmve}m  zoom=${zoom}`, 'info');
+  console.log(`[LIDAR] Params: bmve=${bmve} pmve=${pmve} zoom=${zoom}`);
 
   try{
     // ── ÉTAPE 1 : MNT BIL → masque estran → polygone ─────────────
