@@ -1,13 +1,8 @@
 {
-  "name": "LIDAR Pente — Estran IGN",
-  "short_name": "LIDAR Pente",
-  "description": "Détection d'irrégularités topographiques sur l'estran par pente LIDAR HD IGN",
-  "start_url": "./",
-  "display": "standalone",
-  "background_color": "#06111f",
-  "theme_color": "#0a1628",
-  "lang": "fr",
-  "icons": [
+  "name":"LIDAR Estran — IGN","short_name":"LIDAR Estran",
+  "start_url":"./","display":"standalone",
+  "background_color":"#06111f","theme_color":"#0a1628","lang":"fr",
+  "icons":[
     {"src":"icon192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},
     {"src":"icon512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}
   ]

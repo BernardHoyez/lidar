@@ -1,202 +1,120 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LIDAR Pente — Estran IGN</title>
-  <meta name="description" content="Détection d'irrégularités topographiques sur l'estran par analyse de pente LIDAR HD IGN" />
-  <meta name="theme-color" content="#0a1628" />
-  <link rel="manifest" href="manifest.json" />
-  <link rel="apple-touch-icon" href="icon192.png" />
-  <link rel="icon" href="icon192.png" />
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>LIDAR Estran — IGN</title>
+  <meta name="theme-color" content="#0a1628"/>
+  <link rel="manifest" href="manifest.json"/>
+  <link rel="apple-touch-icon" href="icon192.png"/>
+  <link rel="icon" href="icon192.png"/>
 
-  <!-- Leaflet -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-  <!-- Leaflet Draw -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"/>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
-  <!-- sql.js (SQLite WASM) -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.2/sql-wasm.js"></script>
-  <!-- Turf.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Turf.js/6.5.0/turf.min.js"></script>
 
   <style>
-    /* ─── DESIGN SYSTEM — identique Platier CL ──────── */
-    :root {
-      --bg:        #06111f;
-      --panel:     #0d1e30;
-      --border:    #1a3352;
-      --accent:    #00c8a0;
-      --accent2:   #0090ff;
-      --warn:      #f0a500;
-      --danger:    #e04040;
-      --text:      #c8dff0;
-      --text-dim:  #5a8090;
-      --font-mono: 'Courier New', monospace;
-      --radius:    6px;
-      --panel-w:   340px;
+    :root{
+      --bg:#06111f; --panel:#0d1e30; --border:#1a3352;
+      --acc:#00c8a0; --acc2:#0090ff; --warn:#f0a500; --err:#e04040;
+      --txt:#c8dff0; --dim:#5a8090; --mono:'Courier New',monospace; --r:6px;
+      --panel-w:320px;
     }
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+    body{background:var(--bg);color:var(--txt);font-family:'Segoe UI',system-ui,sans-serif;
+         font-size:13px;height:100dvh;display:flex;flex-direction:column;overflow:hidden;}
 
-    body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      font-size: 13px;
-      height: 100dvh;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
+    header{background:var(--panel);border-bottom:1px solid var(--border);
+           padding:10px 16px;display:flex;align-items:center;gap:14px;flex-shrink:0;z-index:1000;}
+    .logo{font-size:18px;font-weight:700;letter-spacing:.08em;color:var(--acc);font-family:var(--mono);}
+    .logo span{color:var(--acc2);}
+    .tagline{font-size:11px;color:var(--dim);letter-spacing:.06em;text-transform:uppercase;}
+    .hdr-r{margin-left:auto;}
 
-    /* ─── HEADER ─────────────────────────────────────── */
-    header {
-      background: var(--panel);
-      border-bottom: 1px solid var(--border);
-      padding: 10px 16px;
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      flex-shrink: 0;
-      z-index: 1000;
-    }
-    .logo { font-size: 18px; font-weight: 700; letter-spacing: 0.08em; color: var(--accent); font-family: var(--font-mono); }
-    .logo span { color: var(--accent2); }
-    .tagline { font-size: 11px; color: var(--text-dim); letter-spacing: 0.06em; text-transform: uppercase; }
-    .header-actions { margin-left: auto; display: flex; gap: 8px; }
+    .workspace{flex:1;display:flex;overflow:hidden;}
+    #map{flex:1;background:#081520;cursor:crosshair;}
 
-    /* ─── LAYOUT ─────────────────────────────────────── */
-    .workspace { flex: 1; display: flex; overflow: hidden; }
+    .panel{width:var(--panel-w);background:var(--panel);border-left:1px solid var(--border);
+           display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;}
+    .psec{border-bottom:1px solid var(--border);padding:14px;}
+    .stitle{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--acc);
+            margin-bottom:10px;display:flex;align-items:center;gap:6px;}
+    .stitle .badge{background:var(--acc);color:var(--bg);border-radius:50%;
+                   width:16px;height:16px;font-size:9px;display:flex;align-items:center;
+                   justify-content:center;font-weight:700;}
+    .stitle.inactive{color:var(--dim);} .stitle.inactive .badge{background:var(--dim);}
 
-    /* ─── MAP ────────────────────────────────────────── */
-    #map { flex: 1; background: #081520; cursor: crosshair; }
-    .leaflet-draw-toolbar a { background-color: var(--panel) !important; }
+    .cgrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px;}
+    .cbox{background:var(--bg);border:1px solid var(--border);border-radius:var(--r);padding:6px 8px;}
+    .clbl{font-size:9px;color:var(--dim);text-transform:uppercase;margin-bottom:2px;}
+    .cval{font-family:var(--mono);font-size:11px;color:var(--acc2);}
 
-    /* ─── SIDE PANEL ─────────────────────────────────── */
-    .panel {
-      width: var(--panel-w);
-      background: var(--panel);
-      border-left: 1px solid var(--border);
-      display: flex;
-      flex-direction: column;
-      overflow-y: auto;
-      overflow-x: hidden;
-      flex-shrink: 0;
-    }
-    .panel-section { border-bottom: 1px solid var(--border); padding: 14px; }
-    .section-title {
-      font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
-      color: var(--accent); margin-bottom: 10px;
-      display: flex; align-items: center; gap: 6px;
-    }
-    .section-title .step-badge {
-      background: var(--accent); color: var(--bg); border-radius: 50%;
-      width: 16px; height: 16px; font-size: 9px;
-      display: flex; align-items: center; justify-content: center; font-weight: 700;
-    }
-    .section-title.inactive { color: var(--text-dim); }
-    .section-title.inactive .step-badge { background: var(--text-dim); }
+    .frow{display:flex;flex-direction:column;gap:4px;margin-bottom:10px;}
+    .frow label{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;}
+    .frow input{background:var(--bg);border:1px solid var(--border);border-radius:var(--r);
+                padding:7px 9px;color:var(--txt);font-size:13px;font-family:var(--mono);}
+    .frow input:focus{outline:none;border-color:var(--acc);}
+    .frow2{display:flex;gap:8px;margin-bottom:10px;}
+    .frow2 .frow{flex:1;margin-bottom:0;}
 
-    /* ─── COORDS ─────────────────────────────────────── */
-    .coords-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px; }
-    .coord-box { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 8px; }
-    .coord-label { font-size: 9px; color: var(--text-dim); text-transform: uppercase; margin-bottom: 2px; }
-    .coord-val { font-family: var(--font-mono); font-size: 11px; color: var(--accent2); }
+    .infobox{background:rgba(0,200,160,.07);border:1px solid rgba(0,200,160,.2);
+             border-radius:var(--r);padding:7px 9px;font-size:10px;color:var(--dim);
+             line-height:1.8;margin-bottom:10px;}
+    .infobox b{color:var(--acc);}
 
-    /* ─── BUTTONS ────────────────────────────────────── */
-    .btn {
-      display: inline-flex; align-items: center; gap: 6px;
-      padding: 8px 14px; border-radius: var(--radius);
-      border: none; cursor: pointer; font-size: 12px; font-weight: 600;
-      letter-spacing: 0.04em; transition: all .15s;
-      width: 100%; justify-content: center;
-    }
-    .btn-primary   { background: var(--accent); color: var(--bg); }
-    .btn-primary:hover:not(:disabled) { filter: brightness(1.15); }
-    .btn-secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
-    .btn-secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-    .btn:disabled  { opacity: 0.35; cursor: not-allowed; }
-    .btn-warn      { background: var(--warn); color: var(--bg); }
+    .btn{display:flex;align-items:center;justify-content:center;gap:6px;
+         padding:9px 14px;border-radius:var(--r);border:none;cursor:pointer;
+         font-size:12px;font-weight:600;letter-spacing:.04em;transition:all .15s;width:100%;}
+    .btn-primary{background:var(--acc);color:var(--bg);}
+    .btn-primary:hover:not(:disabled){filter:brightness(1.12);}
+    .btn-secondary{background:transparent;color:var(--txt);border:1px solid var(--border);}
+    .btn-secondary:hover:not(:disabled){border-color:var(--acc);color:var(--acc);}
+    .btn-green{background:#00aa44;color:#fff;}
+    .btn-green:hover:not(:disabled){filter:brightness(1.1);}
+    .btn:disabled{opacity:.35;cursor:not-allowed;}
+    .btn+.btn{margin-top:6px;}
 
-    /* ─── FIELDS ─────────────────────────────────────── */
-    .field-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
-    .field-row label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
-    .field-row input, .field-row select {
-      background: var(--bg); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 6px 8px;
-      color: var(--text); font-size: 12px;
-    }
-    .field-row input:focus, .field-row select:focus { outline: none; border-color: var(--accent); }
-    .field-row-2col { display: flex; gap: 8px; }
-    .field-row-2col .field-row { flex: 1; }
+    .log-area{flex:1;overflow-y:auto;padding:10px 14px;font-family:var(--mono);
+              font-size:11px;line-height:1.7;background:var(--bg);}
+    .log-line{display:flex;gap:6px;}
+    .log-line .ts{color:var(--dim);flex-shrink:0;}
+    .log-line.ok  .msg{color:var(--acc);}
+    .log-line.info .msg{color:var(--txt);}
+    .log-line.warn .msg{color:var(--warn);}
+    .log-line.err  .msg{color:var(--err);}
 
-    /* ─── SLIDERS visualiseur ────────────────────────── */
-    .slider-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-    .slider-row label { font-size: 9px; color: var(--text-dim); width: 32px; flex-shrink: 0; }
-    .slider-row input[type=range] {
-      flex: 1; -webkit-appearance: none; height: 3px;
-      background: var(--border); border-radius: 2px; outline: none; cursor: pointer;
-    }
-    .slider-row input[type=range]::-webkit-slider-thumb {
-      -webkit-appearance: none; width: 14px; height: 14px;
-      background: var(--accent); border-radius: 50%;
-    }
-    .slider-val { font-size: 11px; color: var(--accent); font-family: var(--font-mono); width: 38px; text-align: right; flex-shrink: 0; }
+    .prog-wrap{padding:8px 14px;background:var(--panel);border-top:1px solid var(--border);flex-shrink:0;}
+    .prog-lbl{font-size:10px;color:var(--dim);display:flex;justify-content:space-between;margin-bottom:4px;}
+    .prog-bar{height:4px;background:var(--border);border-radius:2px;overflow:hidden;}
+    .prog-fill{height:100%;background:var(--acc);border-radius:2px;transition:width .3s;width:0%;}
 
-    /* ─── VISUALISEUR ────────────────────────────────── */
-    #visuSection { display: none; }
-    #visuCanvas { max-width: 100%; height: auto; border: 1px solid var(--border); display: block; image-rendering: pixelated; margin-top: 8px; }
+    .status-chip{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;
+                 border-radius:99px;font-size:10px;font-weight:600;}
+    .chip-idle{background:#1a2a3a;color:var(--dim);}
+    .chip-running{background:#0a2e22;color:var(--acc);}
+    .chip-done{background:#0a2e22;color:var(--acc);}
+    .chip-error{background:#2e0a0a;color:var(--err);}
+    .dot{width:6px;height:6px;border-radius:50%;}
+    .chip-idle .dot{background:var(--dim);}
+    .chip-running .dot{background:var(--acc);animation:pulse 1s infinite;}
+    .chip-done .dot{background:var(--acc);}
+    .chip-error .dot{background:var(--err);}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 
-    /* ─── LOG ────────────────────────────────────────── */
-    .log-area { flex: 1; overflow-y: auto; padding: 10px 14px; font-family: var(--font-mono); font-size: 11px; line-height: 1.7; background: var(--bg); }
-    .log-line { display: flex; gap: 6px; }
-    .log-line .ts  { color: var(--text-dim); flex-shrink: 0; }
-    .log-line.ok   .msg { color: var(--accent); }
-    .log-line.info .msg { color: var(--text); }
-    .log-line.warn .msg { color: var(--warn); }
-    .log-line.err  .msg { color: var(--danger); }
+    .map-ov{position:absolute;bottom:20px;left:20px;background:rgba(6,17,31,.85);
+            border:1px solid var(--border);border-radius:var(--r);padding:6px 10px;
+            font-size:11px;font-family:var(--mono);color:var(--dim);
+            z-index:1000;pointer-events:none;}
 
-    /* ─── PROGRESS ───────────────────────────────────── */
-    .progress-bar-wrap { padding: 8px 14px; background: var(--panel); border-top: 1px solid var(--border); }
-    .progress-label { font-size: 10px; color: var(--text-dim); display: flex; justify-content: space-between; margin-bottom: 4px; }
-    .progress-bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
-    .progress-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width .3s ease; width: 0%; }
+    ::-webkit-scrollbar{width:4px;}
+    ::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px;}
 
-    /* ─── STATUS ─────────────────────────────────────── */
-    .status-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 99px; font-size: 10px; font-weight: 600; }
-    .chip-idle    { background: #1a2a3a; color: var(--text-dim); }
-    .chip-running { background: #0a2e22; color: var(--accent); }
-    .chip-done    { background: #0a2e22; color: var(--accent); }
-    .chip-error   { background: #2e0a0a; color: var(--danger); }
-    .dot { width: 6px; height: 6px; border-radius: 50%; }
-    .chip-idle .dot    { background: var(--text-dim); }
-    .chip-running .dot { background: var(--accent); animation: pulse 1s infinite; }
-    .chip-done .dot    { background: var(--accent); }
-    .chip-error .dot   { background: var(--danger); }
-    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
-
-    /* ─── DOWNLOAD ───────────────────────────────────── */
-    .download-zone { padding: 14px; border-top: 1px solid var(--border); display: none; }
-    .download-zone.visible { display: block; }
-    .file-info { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-    .file-icon { font-size: 22px; }
-    .file-meta .name { font-weight: 700; color: var(--text); }
-    .file-meta .size { font-size: 11px; color: var(--text-dim); }
-
-    /* ─── MAP OVERLAY ────────────────────────────────── */
-    .map-overlay-info { position: absolute; bottom: 20px; left: 20px; background: rgba(6,17,31,.85); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 10px; font-size: 11px; font-family: var(--font-mono); color: var(--text-dim); z-index: 1000; pointer-events: none; }
-
-    /* ─── SCROLLBAR ──────────────────────────────────── */
-    ::-webkit-scrollbar { width: 4px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-
-    /* ─── RESPONSIVE ─────────────────────────────────── */
-    @media (max-width: 700px) {
-      .panel { width: 100%; max-width: 100%; position: absolute; bottom: 0; left: 0; right: 0; height: 45dvh; border-left: none; border-top: 1px solid var(--border); z-index: 900; }
-      .workspace { flex-direction: column; }
-      #map { height: 55dvh; }
+    @media(max-width:700px){
+      .panel{width:100%;position:absolute;bottom:0;left:0;right:0;height:44dvh;
+             border-left:none;border-top:1px solid var(--border);z-index:900;}
+      #map{height:56dvh;}
     }
   </style>
 </head>
@@ -204,193 +122,96 @@
 
 <header>
   <div>
-    <div class="logo">LIDAR<span>_PENTE</span></div>
-    <div class="tagline">Irrégularités topographiques · Estran · IGN LIDAR HD</div>
+    <div class="logo">LIDAR<span>_ESTRAN</span></div>
+    <div class="tagline">Contour de l'estran · MNT LIDAR IGN</div>
   </div>
-  <div class="header-actions">
-    <span id="globalStatus" class="status-chip chip-idle"><span class="dot"></span> Prêt</span>
+  <div class="hdr-r">
+    <span id="globalStatus" class="status-chip chip-idle"><span class="dot"></span>Prêt</span>
   </div>
 </header>
 
 <div class="workspace">
   <div id="map"></div>
-  <div id="mapInfo" class="map-overlay-info" style="display:none"></div>
+  <div id="mapInfo" class="map-ov" style="display:none"></div>
 
   <aside class="panel">
 
-    <!-- STEP 1 : ZONE -->
-    <div class="panel-section">
-      <div class="section-title" id="step1title">
-        <span class="step-badge">1</span>
-        Sélection de la zone
+    <!-- STEP 1 -->
+    <div class="psec">
+      <div class="stitle"><span class="badge">1</span>Zone d'étude</div>
+      <div class="cgrid">
+        <div class="cbox"><div class="clbl">Lon min</div><div class="cval" id="cLonMin">—</div></div>
+        <div class="cbox"><div class="clbl">Lon max</div><div class="cval" id="cLonMax">—</div></div>
+        <div class="cbox"><div class="clbl">Lat min</div><div class="cval" id="cLatMin">—</div></div>
+        <div class="cbox"><div class="clbl">Lat max</div><div class="cval" id="cLatMax">—</div></div>
       </div>
-      <div class="coords-grid">
-        <div class="coord-box"><div class="coord-label">Lon min</div><div class="coord-val" id="cLonMin">—</div></div>
-        <div class="coord-box"><div class="coord-label">Lon max</div><div class="coord-val" id="cLonMax">—</div></div>
-        <div class="coord-box"><div class="coord-label">Lat min</div><div class="coord-val" id="cLatMin">—</div></div>
-        <div class="coord-box"><div class="coord-label">Lat max</div><div class="coord-val" id="cLatMax">—</div></div>
-      </div>
-      <button class="btn btn-secondary" id="btnClear" style="margin-bottom:6px" disabled>✕ Effacer la zone</button>
+      <button class="btn btn-secondary" id="btnClear" disabled>✕ Effacer la zone</button>
     </div>
 
-    <!-- STEP 2 : PARAMÈTRES ESTRAN -->
-    <div class="panel-section">
-      <div class="section-title inactive" id="step2title">
-        <span class="step-badge">2</span>
-        Paramètres estran &amp; pente
-      </div>
-      <div class="field-row-2col">
-        <div class="field-row">
+    <!-- STEP 2 -->
+    <div class="psec" id="step2">
+      <div class="stitle inactive"><span class="badge">2</span>Paramètres estran</div>
+
+      <div class="frow2">
+        <div class="frow">
           <label>Altitude basse (m NGF)</label>
-          <input type="number" id="bmveAlt" value="-3.0" step="0.1" min="-15" max="0" title="Zéro hydrographique SHOM local"/>
+          <input type="number" id="bmveAlt" value="-3.0" step="0.5" min="-15" max="0"/>
         </div>
-        <div class="field-row">
-          <label>Altitude haute PMVE (m NGF)</label>
-          <input type="number" id="pmveAlt" value="5.0" step="0.1" min="0" max="15" />
+        <div class="frow">
+          <label>Altitude haute (m NGF)</label>
+          <input type="number" id="pmveAlt" value="5.0" step="0.5" min="0" max="15"/>
         </div>
-      </div>
-      <div class="field-row" style="background:rgba(0,200,160,.07);border:1px solid rgba(0,200,160,.2);border-radius:6px;padding:6px 8px;font-size:10px;color:#5a8090;line-height:1.6;">
-        💡 Estran = zone MNT entre <strong style="color:#00c8a0">altitude basse</strong> et <strong style="color:#00c8a0">PMVE</strong>.<br>
-        Le zéro hydrographique SHOM est souvent entre −1 et −5 m NGF.
       </div>
 
-    <!-- STEP 3 : TRAITEMENT -->
-    <div class="panel-section">
-      <div class="section-title inactive" id="step3title">
-        <span class="step-badge">3</span>
-        Traitement
+      <div class="infobox">
+        <b>Altitude basse</b> : zéro hydrographique SHOM local<br>
+        <b>Altitude haute</b> : PMVE (Plus hautes mers vives-eaux)<br>
+        Modifier les valeurs relance le calcul automatiquement.
       </div>
-      <button class="btn btn-primary" id="btnEstran" disabled style="margin-bottom:6px">
-        ⚙ Extraire estran + Pentes LIDAR
-      </button>
+
+      <button class="btn btn-primary" id="btnCalc" disabled>⚙ Calculer le contour</button>
+      <button class="btn btn-green"   id="btnValidate" disabled>✓ Valider — afficher en vert</button>
       <button class="btn btn-secondary" id="btnAbort" disabled>⏹ Annuler</button>
     </div>
 
-    <!-- STEP 4 : VISUALISEUR + EXPORT -->
-    <div class="panel-section" id="visuSection">
-      <div class="section-title" id="step4title">
-        <span class="step-badge">4</span>
-        Visualiseur &amp; Export
-      </div>
-      <button class="btn btn-secondary" onclick="document.getElementById('visuOverlay').style.display='flex'" style="margin-bottom:6px">
-        🔍 Ouvrir le visualiseur
-      </button>
-      <button class="btn btn-warn" id="btnExport">
-        ⬇ Exporter MBTiles
-      </button>
-    </div>
-
     <!-- LOG -->
-    <div class="log-area" id="logArea">
-      <div class="log-line info"><span class="ts">00:00</span><span class="msg">Bienvenue dans LIDAR_PENTE.</span></div>
-      <div class="log-line info"><span class="ts">00:00</span><span class="msg">Dessinez un rectangle sur la carte pour commencer.</span></div>
-    </div>
+    <div class="log-area" id="logArea"></div>
 
     <!-- PROGRESS -->
-    <div class="progress-bar-wrap">
-      <div class="progress-label">
+    <div class="prog-wrap">
+      <div class="prog-lbl">
         <span id="progressLabel">En attente</span>
-        <span id="progressPct">0 %</span>
+        <span id="progressPct">0%</span>
       </div>
-      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
-    </div>
-
-    <!-- DOWNLOAD -->
-    <div class="download-zone" id="downloadZone">
-      <div class="file-info">
-        <div class="file-icon">🗂</div>
-        <div class="file-meta">
-          <div class="name" id="mbtName">lidar_pente.mbtiles</div>
-          <div class="size" id="mbtSize">—</div>
-        </div>
-      </div>
-      <button class="btn btn-warn" id="btnDownload">⬇ Re-télécharger .mbtiles</button>
+      <div class="prog-bar"><div class="prog-fill" id="progressFill"></div></div>
     </div>
 
   </aside>
 </div>
 
-<!-- OVERLAY VISUALISEUR PLEIN ÉCRAN -->
-<div id="visuOverlay" style="display:none;position:fixed;inset:0;z-index:2000;
-  background:rgba(6,17,31,0.97);flex-direction:column;">
-
-  <!-- Barre de contrôle en haut -->
-  <div style="display:flex;align-items:center;gap:14px;padding:10px 16px;
-    border-bottom:1px solid #1a3352;flex-shrink:0;flex-wrap:wrap;">
-    <span style="font-size:12px;letter-spacing:.1em;color:#5a8090;text-transform:uppercase;white-space:nowrap;">
-      Pente estran · niveaux de gris
-    </span>
-
-    <!-- Seuil min -->
-    <div style="display:flex;align-items:center;gap:8px;">
-      <span style="font-size:10px;color:#5a8090;white-space:nowrap;">Seuil min</span>
-      <input type="range" id="sMin" min="0" max="90" value="0" step="0.1"
-        style="-webkit-appearance:none;width:120px;height:3px;background:#1a3352;
-        border-radius:2px;outline:none;cursor:pointer;"/>
-      <span id="lblSMin" style="font-size:11px;color:#00c8a0;font-family:monospace;width:38px;">0.0°</span>
-    </div>
-
-    <!-- Seuil max -->
-    <div style="display:flex;align-items:center;gap:8px;">
-      <span style="font-size:10px;color:#5a8090;white-space:nowrap;">Seuil max</span>
-      <input type="range" id="sMax" min="0" max="90" value="45" step="0.1"
-        style="-webkit-appearance:none;width:120px;height:3px;background:#1a3352;
-        border-radius:2px;outline:none;cursor:pointer;"/>
-      <span id="lblSMax" style="font-size:11px;color:#00c8a0;font-family:monospace;width:38px;">45.0°</span>
-    </div>
-
-    <span id="visuInfo" style="font-size:10px;color:#5a8090;font-family:monospace;margin-left:auto;"></span>
-
-    <button id="btnVisuReset" title="Réinitialiser zoom"
-      style="background:transparent;border:1px solid #1a3352;color:#c8dff0;
-      padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;">⊡ 1:1</button>
-    <button onclick="document.getElementById('visuOverlay').style.display='none'"
-      style="background:transparent;border:1px solid #1a3352;color:#c8dff0;
-      padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;">✕ Fermer</button>
-  </div>
-
-  <!-- Zone canvas zoomable -->
-  <div id="visuViewport" style="flex:1;overflow:hidden;position:relative;cursor:grab;">
-    <canvas id="visuCanvas" style="position:absolute;top:0;left:0;
-      image-rendering:pixelated;transform-origin:0 0;"></canvas>
-  </div>
-
-  <!-- Barre de statut bas -->
-  <div style="padding:6px 16px;border-top:1px solid #1a3352;flex-shrink:0;
-    display:flex;gap:20px;font-size:10px;color:#5a8090;">
-    <span>■ Noir = seuil min &nbsp;·&nbsp; □ Blanc = seuil max</span>
-    <span>Molette : zoom &nbsp;·&nbsp; Glisser : déplacer</span>
-    <span id="visuZoomLbl" style="margin-left:auto;">zoom 100%</span>
-  </div>
-</div>
-
-<!-- Bannière mise à jour SW -->
-<div id="swUpdateBanner" style="position:fixed;top:0;left:0;right:0;z-index:9999;
+<!-- SW update banner -->
+<div id="swBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;
   background:#f0a500;color:#06111f;padding:8px 16px;font-size:13px;font-weight:600;
-  align-items:center;gap:12px;justify-content:center;display:none;">
-  ⚡ Nouvelle version disponible —
-  <button onclick="window.location.reload(true)"
+  align-items:center;gap:12px;justify-content:center;">
+  ⚡ Nouvelle version —
+  <button onclick="location.reload(true)"
     style="background:#06111f;color:#f0a500;border:none;padding:4px 12px;
-    border-radius:4px;cursor:pointer;font-weight:700;">
-    Recharger maintenant
-  </button>
+    border-radius:4px;cursor:pointer;font-weight:700;">Recharger</button>
 </div>
 
 <script>
-const APP_VERSION = '3.2.0';
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js').then(reg => {
-    reg.addEventListener('updatefound', () => {
-      const nw = reg.installing;
-      nw.addEventListener('statechange', () => {
-        if (nw.state === 'installed' && navigator.serviceWorker.controller)
-          document.getElementById('swUpdateBanner').style.display = 'flex';
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('./sw.js').then(reg=>{
+    reg.addEventListener('updatefound',()=>{
+      reg.installing.addEventListener('statechange',function(){
+        if(this.state==='installed'&&navigator.serviceWorker.controller)
+          document.getElementById('swBanner').style.display='flex';
       });
     });
   });
-  navigator.serviceWorker.addEventListener('controllerchange', () => window.location.reload());
+  navigator.serviceWorker.addEventListener('controllerchange',()=>location.reload());
 }
 </script>
-<script src="app.js?v=3.2.0"></script>
+<script src="app.js?v=1.0.0"></script>
 </body>
 </html>
