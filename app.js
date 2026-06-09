@@ -225,47 +225,64 @@ async function downloadMNT(bbox){
 
 // ── MASQUE ESTRAN (flood-fill depuis la mer) ───────────────────────
 function buildMask(grid, cols, rows, bmve, pmve){
-  // Classifier : 1=mer (<bmve ou NaN), 2=estran [bmve,pmve], 0=terre
+  // Classifier chaque pixel :
+  //   SEA  (1) = NaN ou v < bmve  → mer / zone subtidale
+  //   INTR (2) = bmve ≤ v ≤ pmve  → estran inter-tidal
+  //   LAND (0) = v > pmve          → terre
+  const SEA=1, INTR=2;
   const state = new Uint8Array(cols*rows);
   for(let i=0; i<grid.length; i++){
     const v = grid[i];
-    if(isNaN(v)||v<bmve)  state[i] = 1;
-    else if(v<=pmve)      state[i] = 2;
+    if(isNaN(v) || v < bmve) state[i] = SEA;
+    else if(v <= pmve)        state[i] = INTR;
+    // else 0 = terre
   }
 
-  // BFS depuis les bords pour identifier la mer connexe à l'extérieur
+  // BFS depuis les bords : identifier la mer connexe à l'extérieur
+  // La mer connexe peut traverser les pixels SEA (y compris subtidale < bmve)
   const sea = new Uint8Array(cols*rows);
   const q = [];
-  const push = i => { if(!sea[i]&&state[i]===1){ sea[i]=1; q.push(i); } };
-  for(let c=0; c<cols; c++){ push(c); push((rows-1)*cols+c); }
-  for(let r=0; r<rows; r++){ push(r*cols); push(r*cols+cols-1); }
+  const pushSea = i => {
+    if(!sea[i] && state[i]===SEA){ sea[i]=1; q.push(i); }
+  };
+  for(let c=0; c<cols; c++){ pushSea(c); pushSea((rows-1)*cols+c); }
+  for(let r=0; r<rows; r++){ pushSea(r*cols); pushSea(r*cols+cols-1); }
   let qi=0;
   while(qi<q.length){
     const i=q[qi++], r=Math.floor(i/cols), c=i%cols;
-    if(c>0)      push(i-1);
-    if(c<cols-1) push(i+1);
-    if(r>0)      push(i-cols);
-    if(r<rows-1) push(i+cols);
+    if(c>0)      pushSea(i-1);
+    if(c<cols-1) pushSea(i+1);
+    if(r>0)      pushSea(i-cols);
+    if(r<rows-1) pushSea(i+cols);
   }
 
-  // BFS depuis l'estran adjacent à la mer connexe
+  // BFS de l'estran : partir des pixels INTR adjacents à la mer connexe,
+  // puis propager à tous les pixels INTR connexes entre eux.
+  // Inclure aussi les pixels SEA enclavés (chenaux, lagunes) si entourés d'INTR.
   const mask = new Uint8Array(cols*rows);
   const q2 = [];
   for(let i=0; i<cols*rows; i++){
-    if(state[i]!==2) continue;
+    if(state[i]!==INTR) continue;
     const r=Math.floor(i/cols), c=i%cols;
-    const nbrs=[];
-    if(c>0) nbrs.push(i-1); if(c<cols-1) nbrs.push(i+1);
-    if(r>0) nbrs.push(i-cols); if(r<rows-1) nbrs.push(i+cols);
-    if(nbrs.some(j=>sea[j])){ mask[i]=1; q2.push(i); }
+    let adjSea=false;
+    if(c>0      && sea[i-1])    adjSea=true;
+    if(c<cols-1 && sea[i+1])    adjSea=true;
+    if(r>0      && sea[i-cols]) adjSea=true;
+    if(r<rows-1 && sea[i+cols]) adjSea=true;
+    if(adjSea){ mask[i]=1; q2.push(i); }
   }
   let q2i=0;
   while(q2i<q2.length){
     const i=q2[q2i++], r=Math.floor(i/cols), c=i%cols;
     const nbrs=[];
-    if(c>0) nbrs.push(i-1); if(c<cols-1) nbrs.push(i+1);
-    if(r>0) nbrs.push(i-cols); if(r<rows-1) nbrs.push(i+cols);
-    for(const j of nbrs) if(!mask[j]&&state[j]===2){ mask[j]=1; q2.push(j); }
+    if(c>0)      nbrs.push(i-1);
+    if(c<cols-1) nbrs.push(i+1);
+    if(r>0)      nbrs.push(i-cols);
+    if(r<rows-1) nbrs.push(i+cols);
+    for(const j of nbrs){
+      if(mask[j]) continue;
+      if(state[j]===INTR){ mask[j]=1; q2.push(j); }
+    }
   }
   return mask;
 }
@@ -358,6 +375,8 @@ async function computeContour(){
   if(isNaN(bmve)||isNaN(pmve)){log('Valeurs invalides.','warn');return;}
   if(bmve>=pmve){log('BMVE doit être < PMVE.','warn');return;}
   log(`▶ Calcul estran BMVE=${bmve} m  PMVE=${pmve} m`,'info');
+  // Diagnostic altitudes
+  if(ST.grid){ let mn=Infinity,mx=-Infinity; for(const v of ST.grid) if(!isNaN(v)){if(v<mn)mn=v;if(v>mx)mx=v;} log(`MNT : altitudes disponibles [${mn.toFixed(1)}, ${mx.toFixed(1)}] m NGF`,'info'); }
 
   try{
     // 1. MNT (télécharger seulement si pas déjà en cache)
