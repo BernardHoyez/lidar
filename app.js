@@ -202,6 +202,20 @@ async function downloadMNT(bbox){
     await prog(`MNT ${done}/${nT} tuiles${errs?` (${errs} err)`:''}`, 5+30*(done/nT));
   }
 
+  // Masquer les pixels hors bbox demandée (les tuiles dépassent la bbox)
+  const dLon = gridBBox.maxLon - gridBBox.minLon;
+  const dLat = gridBBox.maxLat - gridBBox.minLat;
+  for(let py=0; py<gR; py++){
+    for(let px=0; px<gC; px++){
+      const lon = gridBBox.minLon + (px+0.5)/gC * dLon;
+      const lat = gridBBox.maxLat - (py+0.5)/gR * dLat;
+      if(lon < bbox.minLon || lon > bbox.maxLon ||
+         lat < bbox.minLat || lat > bbox.maxLat){
+        grid[py*gC+px] = NaN;
+      }
+    }
+  }
+
   let mn=Infinity, mx=-Infinity, nv=0;
   for(const v of grid) if(!isNaN(v)){ if(v<mn)mn=v; if(v>mx)mx=v; nv++; }
   log(`MNT OK : alt. [${mn.toFixed(1)}, ${mx.toFixed(1)}] m NGF — ${nv}/${gC*gR} px valides`, 'ok');
