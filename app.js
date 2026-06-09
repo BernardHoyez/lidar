@@ -353,9 +353,11 @@ async function computeContour(){
   clearLayers();
   setStatus('run');
 
-  const bmve = parseFloat($('bmveAlt').value) || -3;
-  const pmve = parseFloat($('pmveAlt').value) || 5;
-  log(`▶ Calcul estran BMVE=${bmve} m  PMVE=${pmve} m`, 'info');
+  const bmve = $('bmveAlt').value !== '' ? parseFloat($('bmveAlt').value) : -3;
+  const pmve = $('pmveAlt').value !== '' ? parseFloat($('pmveAlt').value) : 5;
+  if(isNaN(bmve)||isNaN(pmve)){log('Valeurs invalides.','warn');return;}
+  if(bmve>=pmve){log('BMVE doit être < PMVE.','warn');return;}
+  log(`▶ Calcul estran BMVE=${bmve} m  PMVE=${pmve} m`,'info');
 
   try{
     // 1. MNT (télécharger seulement si pas déjà en cache)
@@ -442,8 +444,14 @@ $('btnClear').addEventListener('click', ()=>{
   log('Zone effacée.','warn');
 });
 
-// Recalcul automatique si BMVE/PMVE changent et MNT déjà chargé
-$('bmveAlt').addEventListener('change', ()=>{ if(ST.grid) computeContour(); });
-$('pmveAlt').addEventListener('change', ()=>{ if(ST.grid) computeContour(); });
+// Recalcul sur modification BMVE/PMVE — debounce 600ms
+let recalcTimer = null;
+function scheduleRecalc(){
+  if(!ST.grid) return;
+  clearTimeout(recalcTimer);
+  recalcTimer = setTimeout(computeContour, 600);
+}
+$('bmveAlt').addEventListener('input', scheduleRecalc);
+$('pmveAlt').addEventListener('input', scheduleRecalc);
 
 log('LIDAR_ESTRAN v1.0 — Dessinez un rectangle sur la carte.', 'ok');
