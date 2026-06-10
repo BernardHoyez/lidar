@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   LIDAR_ESTRAN v2.0.0
+   LIDAR_ESTRAN v2.1.0
    Ombrage LiDAR HD IGN masqué à l'estran
    ─────────────────────────────────────────────────────────────
    1. Rectangle utilisateur
@@ -15,7 +15,7 @@ const IGN_WMTS     = 'https://data.geopf.fr/wmts';
 const MNT_LAYER    = 'ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES';
 const MNT_FMT      = 'image/x-bil;bits=32';
 const MNT_TMS      = 'WGS84G';
-const WGS84G_L     = 13;      // ~19 m/px — bon compromis densité/rapidité
+const WGS84G_L     = 14;      // ~5 m/px — résolution suffisante pour capter les faibles altitudes
 const BIL_NODATA   = -99999;
 const SHADOW_LAYER = 'IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW';
 const SHADOW_FMT   = 'image/png';
@@ -527,4 +527,4 @@ $('contrast').addEventListener('input',()=>{
   if(ST.grid) scheduleRecalc();
 });
 
-log('LIDAR_ESTRAN v2.0 — Dessinez un rectangle sur la carte.','ok');
+log('LIDAR_ESTRAN v2.1 — Dessinez un rectangle sur la carte.','ok');
