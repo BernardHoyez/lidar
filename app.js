@@ -178,7 +178,7 @@ async function downloadMNT(bbox){
         const ox=(tc-col0)*TILE_PX,oy=(tr-row0)*TILE_PX;
         for(let py=0;py<TILE_PX;py++) for(let px=0;px<TILE_PX;px++){
           const v=bil[py*TILE_PX+px];
-          grid[(oy+py)*gC+(ox+px)]=v<BIL_NODATA/2?NaN:v;
+          grid[(oy+py)*gC+(ox+px)] = (v < -1000 || v > 9000) ? NaN : v;
         }
       } else {errs++;log(`✗ MNT ${batch[j].tc}/${batch[j].tr}: ${res[j].reason?.message}`,'warn');}
       done++;
@@ -194,8 +194,13 @@ async function downloadMNT(bbox){
       grid[py*gC+px]=NaN;
   }
   let mn=Infinity,mx=-Infinity,nv=0;
-  for(const v of grid) if(!isNaN(v)){if(v<mn)mn=v;if(v>mx)mx=v;nv++;}
-  log(`MNT OK : [${mn.toFixed(1)}, ${mx.toFixed(1)}] m NGF — ${nv}/${gC*gR} px valides`,'ok');
+  const vals=[];
+  for(const v of grid) if(!isNaN(v)){if(v<mn)mn=v;if(v>mx)mx=v;nv++;vals.push(v);}
+  vals.sort((a,b)=>a-b);
+  const p10=vals[Math.floor(vals.length*0.10)]?.toFixed(1)??'—';
+  const p50=vals[Math.floor(vals.length*0.50)]?.toFixed(1)??'—';
+  const p90=vals[Math.floor(vals.length*0.90)]?.toFixed(1)??'—';
+  log(`MNT OK : min=${mn.toFixed(1)} p10=${p10} p50=${p50} p90=${p90} max=${mx.toFixed(1)} m NGF — ${nv}/${gC*gR} px valides`,'ok');
   return{grid,cols:gC,rows:gR,bbox:gBBox};
 }
 
@@ -409,7 +414,12 @@ async function compute(){
     const mask=buildMask(ST.grid,ST.gridCols,ST.gridRows,pmve);
     const nCells=mask.reduce((s,v)=>s+v,0);
     log(`Masque : ${nCells}/${ST.gridCols*ST.gridRows} cellules ≤ ${pmve} m`,'info');
-    if(!nCells) throw new Error(`Aucun pixel ≤ ${pmve} m NGF dans cette zone.`);
+    if(!nCells){
+      // Donner une indication sur les vraies altitudes disponibles
+      let mn=Infinity,mx=-Infinity;
+      for(const v of ST.grid) if(!isNaN(v)){if(v<mn)mn=v;if(v>mx)mx=v;}
+      throw new Error(`Aucun pixel ≤ ${pmve} m NGF. Altitudes disponibles dans la zone : [${mn.toFixed(1)}, ${mx.toFixed(1)}] m. Augmentez la PMVE ou sélectionnez une zone plus proche de l'estran.`);
+    }
 
     // 3. Contour vecteur
     await prog('Contour estran…',32);
