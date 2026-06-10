@@ -206,19 +206,23 @@ async function downloadMNT(bbox){
 }
 
 // ── MASQUE ESTRAN (flood-fill depuis la mer) ───────────────────────
-function buildMask(grid,cols,rows,pmve){
-  // SEA=1 : v > pmve ou NaN (tout ce qui n'est pas l'estran ni la mer subtidale)
-  // INTR=2 : v <= pmve (estran + zone subtidale)
-  // Le masque final = zone INTR connexe à l'extérieur du domaine
+function buildMask(grid, cols, rows, bmve, pmve){
+  // SEA  (1) : v < bmve ou hors-bbox (-500) → mer, sert de point de départ BFS
+  // INTR (2) : bmve ≤ v ≤ pmve → estran à afficher
+  // LAND (0) : v > pmve → terre, bloquant
+  const SEA=1, INTR=2;
   const state=new Uint8Array(cols*rows);
   for(let i=0;i<grid.length;i++){
     const v=grid[i];
-    if(!isNaN(v)&&v<=pmve) state[i]=2; else state[i]=1;
+    if(isNaN(v)||v<bmve) state[i]=SEA;
+    else if(v<=pmve)     state[i]=INTR;
+    // else 0 = terre
   }
-  // BFS depuis les bords pour trouver la zone INTR (mer + estran) connexe à l'extérieur
-  const reach=new Uint8Array(cols*rows);
+  // BFS depuis les bords pour identifier la mer connexe à l'extérieur
+  // La mer (-500 hors-bbox) garantit la connexion depuis les bords
+  const sea=new Uint8Array(cols*rows);
   const q=[];
-  const push=i=>{if(!reach[i]&&state[i]===2){reach[i]=1;q.push(i);}};
+  const push=i=>{if(!sea[i]&&state[i]===SEA){sea[i]=1;q.push(i);}};
   for(let c=0;c<cols;c++){push(c);push((rows-1)*cols+c);}
   for(let r=0;r<rows;r++){push(r*cols);push(r*cols+cols-1);}
   let qi=0;
@@ -229,7 +233,28 @@ function buildMask(grid,cols,rows,pmve){
     if(r>0)      push(i-cols);
     if(r<rows-1) push(i+cols);
   }
-  return reach; // 1 = dans le masque estran
+  // BFS estran : pixels INTR adjacents à la mer connexe
+  const mask=new Uint8Array(cols*rows);
+  const q2=[];
+  for(let i=0;i<cols*rows;i++){
+    if(state[i]!==INTR) continue;
+    const r=Math.floor(i/cols),c=i%cols;
+    if((c>0&&sea[i-1])||(c<cols-1&&sea[i+1])||
+       (r>0&&sea[i-cols])||(r<rows-1&&sea[i+cols])){
+      mask[i]=1; q2.push(i);
+    }
+  }
+  let q2i=0;
+  while(q2i<q2.length){
+    const i=q2[q2i++],r=Math.floor(i/cols),c=i%cols;
+    const nbrs=[];
+    if(c>0)      nbrs.push(i-1);
+    if(c<cols-1) nbrs.push(i+1);
+    if(r>0)      nbrs.push(i-cols);
+    if(r<rows-1) nbrs.push(i+cols);
+    for(const j of nbrs) if(!mask[j]&&state[j]===INTR){mask[j]=1;q2.push(j);}
+  }
+  return mask;
 }
 
 // ── WMTS OMBRAGE (PNG en PM) ────────────────────────────────────────
@@ -393,11 +418,13 @@ async function compute(){
   clearOverlay();
   setStatus('run');
 
+  const bmve     = $('bmveAlt').value!=='' ? parseFloat($('bmveAlt').value) : -3;
   const pmve     = $('pmveAlt').value!=='' ? parseFloat($('pmveAlt').value) : 4.5;
   const zoom     = parseInt($('shadowZoom').value)||16;
   const contrast = parseFloat($('contrast').value)||1.0;
-  if(isNaN(pmve)){log('Valeur PMVE invalide.','warn');return;}
-  log(`▶ PMVE=${pmve} m  zoom=${zoom}  contraste=×${contrast.toFixed(1)}`,'info');
+  if(isNaN(bmve)||isNaN(pmve)){log('Valeurs invalides.','warn');return;}
+  if(bmve>=pmve){log(`BMVE (${bmve}) doit être < PMVE (${pmve}).`,'warn');return;}
+  log(`▶ BMVE=${bmve} m  PMVE=${pmve} m  zoom=${zoom}  contraste=×${contrast.toFixed(1)}`,'info');
 
   try{
     // 1. MNT (mis en cache)
@@ -412,14 +439,13 @@ async function compute(){
     // 2. Masque
     await prog('Masque estran…',31);
     log('Calcul du masque…','info');
-    const mask=buildMask(ST.grid,ST.gridCols,ST.gridRows,pmve);
+    const mask=buildMask(ST.grid,ST.gridCols,ST.gridRows,bmve,pmve);
     const nCells=mask.reduce((s,v)=>s+v,0);
-    log(`Masque : ${nCells}/${ST.gridCols*ST.gridRows} cellules ≤ ${pmve} m`,'info');
+    log(`Masque : ${nCells} cellules dans [${bmve}, ${pmve}] m`,'info');
     if(!nCells){
-      // Donner une indication sur les vraies altitudes disponibles
       let mn=Infinity,mx=-Infinity;
-      for(const v of ST.grid) if(!isNaN(v)){if(v<mn)mn=v;if(v>mx)mx=v;}
-      throw new Error(`Aucun pixel ≤ ${pmve} m NGF. Altitudes disponibles dans la zone : [${mn.toFixed(1)}, ${mx.toFixed(1)}] m. Augmentez la PMVE ou sélectionnez une zone plus proche de l'estran.`);
+      for(const v of ST.grid) if(!isNaN(v)&&v>-499){if(v<mn)mn=v;if(v>mx)mx=v;}
+      throw new Error(`Aucun pixel dans [${bmve}, ${pmve}] m NGF. Zone disponible : [${mn.toFixed(1)}, ${mx.toFixed(1)}] m.`);
     }
 
     // 3. Contour vecteur
@@ -493,6 +519,7 @@ function scheduleRecalc(){
   recalcT=setTimeout(compute,700);
 }
 $('pmveAlt').addEventListener('input',scheduleRecalc);
+$('bmveAlt').addEventListener('input',scheduleRecalc);
 
 // Recalcul contraste immédiat (slider)
 $('contrast').addEventListener('input',()=>{
