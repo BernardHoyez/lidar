@@ -185,22 +185,23 @@ async function downloadMNT(bbox){
     }
     await prog(`MNT ${done}/${nT}${errs?` (${errs} err)`:''}`,5+25*(done/nT));
   }
-  // Masquer pixels hors bbox exacte
+  // Pixels hors bbox exacte → marqués comme "mer profonde" (valeur très négative)
+  // pour que le flood-fill BFS puisse partir des bords et entrer dans la bbox
   const dLon=gBBox.maxLon-gBBox.minLon,dLat=gBBox.maxLat-gBBox.minLat;
   for(let py=0;py<gR;py++) for(let px=0;px<gC;px++){
     const lon=gBBox.minLon+(px+0.5)/gC*dLon;
     const lat=gBBox.maxLat-(py+0.5)/gR*dLat;
     if(lon<bbox.minLon||lon>bbox.maxLon||lat<bbox.minLat||lat>bbox.maxLat)
-      grid[py*gC+px]=NaN;
+      grid[py*gC+px]=-500; // mer artificielle — hors zone sélectionnée
   }
   let mn=Infinity,mx=-Infinity,nv=0;
   const vals=[];
-  for(const v of grid) if(!isNaN(v)){if(v<mn)mn=v;if(v>mx)mx=v;nv++;vals.push(v);}
+  for(const v of grid) if(!isNaN(v)&&v>-499){if(v<mn)mn=v;if(v>mx)mx=v;nv++;vals.push(v);}
   vals.sort((a,b)=>a-b);
   const p10=vals[Math.floor(vals.length*0.10)]?.toFixed(1)??'—';
   const p50=vals[Math.floor(vals.length*0.50)]?.toFixed(1)??'—';
   const p90=vals[Math.floor(vals.length*0.90)]?.toFixed(1)??'—';
-  log(`MNT OK : min=${mn.toFixed(1)} p10=${p10} p50=${p50} p90=${p90} max=${mx.toFixed(1)} m NGF — ${nv}/${gC*gR} px valides`,'ok');
+  log(`MNT OK : min=${mn.toFixed(1)} p10=${p10} p50=${p50} p90=${p90} max=${mx.toFixed(1)} m NGF — ${nv} px valides dans la zone`,'ok');
   return{grid,cols:gC,rows:gR,bbox:gBBox};
 }
 
