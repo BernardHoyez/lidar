@@ -1,5 +1,5 @@
 /* LIDAR_ESTRAN sw v2.0.0 */
-const CACHE='lidar-estran-v2.1.0';
+const CACHE='lidar-estran-v2.2.0';
 const PRE=['./', './index.html','./app.js','./manifest.json','./icon192.png','./icon512.png'];
 self.addEventListener('install',e=>{e.waitUntil(caches.open(CACHE).then(c=>c.addAll(PRE)).then(()=>self.skipWaiting()));});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(ks=>Promise.all(ks.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim()));});

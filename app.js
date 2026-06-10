@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   LIDAR_ESTRAN v2.1.0
+   LIDAR_ESTRAN v2.2.0
    Ombrage LiDAR HD IGN masqué à l'estran
    ─────────────────────────────────────────────────────────────
    1. Rectangle utilisateur
@@ -152,8 +152,8 @@ async function fetchBIL(col,row,L){
   return new Float32Array(buf,0,TILE_PX*TILE_PX);
 }
 
-async function downloadMNT(bbox){
-  const L=WGS84G_L;
+async function downloadMNT(bbox, L){
+  L = L || WGS84G_L;
   const {col:col0,row:row0}=ll2wgs84(bbox.minLon,bbox.maxLat,L);
   const {col:col1,row:row1}=ll2wgs84(bbox.maxLon,bbox.minLat,L);
   const tC=col1-col0+1,tR=row1-row0+1,nT=tC*tR;
@@ -207,52 +207,31 @@ async function downloadMNT(bbox){
 
 // ── MASQUE ESTRAN (flood-fill depuis la mer) ───────────────────────
 function buildMask(grid, cols, rows, bmve, pmve){
-  // SEA  (1) : v < bmve ou hors-bbox (-500) → mer, sert de point de départ BFS
-  // INTR (2) : bmve ≤ v ≤ pmve → estran à afficher
-  // LAND (0) : v > pmve → terre, bloquant
-  const SEA=1, INTR=2;
-  const state=new Uint8Array(cols*rows);
-  for(let i=0;i<grid.length;i++){
-    const v=grid[i];
-    if(isNaN(v)||v<bmve) state[i]=SEA;
-    else if(v<=pmve)     state[i]=INTR;
-    // else 0 = terre
+  // Stratégie : tout pixel ≤ PMVE connexe à l'extérieur de la grille = estran.
+  // La BMVE sert uniquement à l'affichage (transparence) dans buildOverlay,
+  // pas comme seuil de masque — car les valeurs subtidale < BMVE sont rares
+  // dans le MNT et bloqueraient la connexité.
+  // Les pixels hors-bbox (-500) garantissent la connexion depuis les bords.
+
+  const state = new Uint8Array(cols*rows);
+  for(let i=0; i<grid.length; i++){
+    const v = grid[i];
+    state[i] = (!isNaN(v) && v <= pmve) ? 2 : 1; // 2=candidat estran, 1=bloquant
   }
-  // BFS depuis les bords pour identifier la mer connexe à l'extérieur
-  // La mer (-500 hors-bbox) garantit la connexion depuis les bords
-  const sea=new Uint8Array(cols*rows);
-  const q=[];
-  const push=i=>{if(!sea[i]&&state[i]===SEA){sea[i]=1;q.push(i);}};
-  for(let c=0;c<cols;c++){push(c);push((rows-1)*cols+c);}
-  for(let r=0;r<rows;r++){push(r*cols);push(r*cols+cols-1);}
+
+  // BFS depuis les bords
+  const mask = new Uint8Array(cols*rows);
+  const q = [];
+  const push = i => { if(!mask[i] && state[i]===2){ mask[i]=1; q.push(i); } };
+  for(let c=0; c<cols; c++){ push(c); push((rows-1)*cols+c); }
+  for(let r=0; r<rows; r++){ push(r*cols); push(r*cols+cols-1); }
   let qi=0;
   while(qi<q.length){
-    const i=q[qi++],r=Math.floor(i/cols),c=i%cols;
+    const i=q[qi++], r=Math.floor(i/cols), c=i%cols;
     if(c>0)      push(i-1);
     if(c<cols-1) push(i+1);
     if(r>0)      push(i-cols);
     if(r<rows-1) push(i+cols);
-  }
-  // BFS estran : pixels INTR adjacents à la mer connexe
-  const mask=new Uint8Array(cols*rows);
-  const q2=[];
-  for(let i=0;i<cols*rows;i++){
-    if(state[i]!==INTR) continue;
-    const r=Math.floor(i/cols),c=i%cols;
-    if((c>0&&sea[i-1])||(c<cols-1&&sea[i+1])||
-       (r>0&&sea[i-cols])||(r<rows-1&&sea[i+cols])){
-      mask[i]=1; q2.push(i);
-    }
-  }
-  let q2i=0;
-  while(q2i<q2.length){
-    const i=q2[q2i++],r=Math.floor(i/cols),c=i%cols;
-    const nbrs=[];
-    if(c>0)      nbrs.push(i-1);
-    if(c<cols-1) nbrs.push(i+1);
-    if(r>0)      nbrs.push(i-cols);
-    if(r<rows-1) nbrs.push(i+cols);
-    for(const j of nbrs) if(!mask[j]&&state[j]===INTR){mask[j]=1;q2.push(j);}
   }
   return mask;
 }
@@ -280,7 +259,7 @@ async function fetchShadowTile(x,y,z){
 }
 
 // ── ASSEMBLAGE OMBRAGE + MASQUE → ImageOverlay ─────────────────────
-async function buildOverlay(bbox,mask,maskCols,maskRows,maskBBox,zoom,contrast){
+async function buildOverlay(bbox, mask, maskCols, maskRows, maskBBox, zoom, contrast, bmve, pmve){
   // Tuiles PM couvrant la bbox
   const x0=lon2x(bbox.minLon,zoom),x1=lon2x(bbox.maxLon,zoom);
   const y0=lat2y(bbox.maxLat,zoom),y1=lat2y(bbox.minLat,zoom);
@@ -427,11 +406,13 @@ async function compute(){
   log(`▶ BMVE=${bmve} m  PMVE=${pmve} m  zoom=${zoom}  contraste=×${contrast.toFixed(1)}`,'info');
 
   try{
-    // 1. MNT (mis en cache)
-    if(!ST.grid){
+    // 1. MNT — même zoom que l'ombrage, clamped à [6,14]
+    const mntLevel = Math.max(6, Math.min(14, zoom));
+    if(!ST.grid || ST.lastMntLevel !== mntLevel){
       await prog('Téléchargement MNT BIL…',2);
-      const{grid,cols,rows,bbox}=await downloadMNT(ST.bbox);
-      ST.grid=grid; ST.gridCols=cols; ST.gridRows=rows; ST.gridBBox=bbox;
+      const{grid,cols,rows,bbox:gb}=await downloadMNT(ST.bbox, mntLevel);
+      ST.grid=grid; ST.gridCols=cols; ST.gridRows=rows; ST.gridBBox=gb;
+      ST.lastMntLevel = mntLevel;
     } else {
       log('MNT en cache — recalcul masque direct','info');
     }
@@ -459,7 +440,7 @@ async function compute(){
 
     // 4. Tuiles ombrage + masque → canvas
     await prog('Ombrage LiDAR HD…',33);
-    const{canvas,bbox:sBBox}=await buildOverlay(ST.bbox,mask,ST.gridCols,ST.gridRows,ST.gridBBox,zoom,contrast);
+    const{canvas,bbox:sBBox}=await buildOverlay(ST.bbox,mask,ST.gridCols,ST.gridRows,ST.gridBBox,zoom,contrast,bmve,pmve);
 
     // 5. Affichage ImageOverlay Leaflet
     await prog('Affichage…',97);
@@ -527,4 +508,4 @@ $('contrast').addEventListener('input',()=>{
   if(ST.grid) scheduleRecalc();
 });
 
-log('LIDAR_ESTRAN v2.1 — Dessinez un rectangle sur la carte.','ok');
+log('LIDAR_ESTRAN v2.2 — Dessinez un rectangle sur la carte.','ok');
